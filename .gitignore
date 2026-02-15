@@ -11,7 +11,7 @@ coverage
 build
 dist
 out
-/backend/storage/*/**
+/backend/storage/*/*
 !/backend/storage/*/
 !/backend/storage/*
 
@@ -48,4 +48,5 @@ pid
 
 # Temporary files
 tmp
+!.gitkeep
 temp
