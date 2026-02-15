@@ -11,7 +11,9 @@ coverage
 build
 dist
 out
-storage
+storage/*/**
+!storage/*/
+!storage/*
 
 # Misc
 .DS_Store
