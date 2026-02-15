@@ -1,13 +1,13 @@
 package storage
 
 import (
+	"arisubs/backend/config"
+	"arisubs/backend/models"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"aytce/backend/config"
-	"aytce/backend/models"
 )
 
 type Store struct {
@@ -55,15 +55,20 @@ func (s *Store) VideosDir() string {
 	return s.cfg.VideosDir()
 }
 
+/*
+ * [VideoExists]
+ * - Check for video file existence
+ * - Extensive logging for debugging path issues
+ * - Fallback logic: List directory contents if file not found to help debug
+ */
 func (s *Store) VideoExists(videoID string) bool {
 	path := s.VideoPath(videoID)
 	log.Printf("[DEBUG] VideoExists: Checking for video ID: %s", videoID)
 	log.Printf("[DEBUG] VideoExists: Checking path: %s", path)
-	
+
 	_, err := os.Stat(path)
 	if err != nil {
 		log.Printf("[DEBUG] VideoExists: File not found at path: %s (error: %v)", path, err)
-		// Try to find the file with different path formats
 		videosDir := s.VideosDir()
 		log.Printf("[DEBUG] VideoExists: Videos directory: %s", videosDir)
 		files, readErr := os.ReadDir(videosDir)

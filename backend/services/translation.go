@@ -46,18 +46,25 @@ type TranslateResponse struct {
 	TranslatedText string `json:"translatedText"`
 }
 
+/*
+ * [Translate]
+ * - Map language codes - LibreTranslate uses standard ISO codes
+ * - Handle "auto" for auto-detection
+ * - Build request
+ * - Add API key if provided
+ * - Make request to LibreTranslate
+ * - Provide helpful error message for API key requirement
+ * - Parse response
+ */
 func (s *TranslationService) Translate(text string, sourceLang string, targetLang string) (string, error) {
 	if text == "" {
 		return "", fmt.Errorf("text cannot be empty")
 	}
 
-	// Map language codes - LibreTranslate uses standard ISO codes
-	// Handle "auto" for auto-detection
 	if sourceLang == "auto" {
 		sourceLang = "auto"
 	}
 
-	// Build request
 	reqBody := TranslateRequest{
 		Q:      text,
 		Source: sourceLang,
@@ -65,7 +72,6 @@ func (s *TranslationService) Translate(text string, sourceLang string, targetLan
 		Format: "text",
 	}
 
-	// Add API key if provided
 	if s.apiKey != "" {
 		reqBody.APIKey = s.apiKey
 	}
@@ -75,7 +81,6 @@ func (s *TranslationService) Translate(text string, sourceLang string, targetLan
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Make request to LibreTranslate
 	url := fmt.Sprintf("%s/translate", s.baseURL)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -93,16 +98,14 @@ func (s *TranslationService) Translate(text string, sourceLang string, targetLan
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		errorMsg := string(bodyBytes)
-		
-		// Provide helpful error message for API key requirement
+
 		if resp.StatusCode == http.StatusBadRequest && (s.apiKey == "" || contains(errorMsg, "API key")) {
 			return "", fmt.Errorf("translation service requires an API key. Please set LIBRETRANSLATE_API_KEY environment variable or use a self-hosted instance. Visit https://portal.libretranslate.com to get an API key")
 		}
-		
+
 		return "", fmt.Errorf("translation API returned status %d: %s", resp.StatusCode, errorMsg)
 	}
 
-	// Parse response
 	var translateResp TranslateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&translateResp); err != nil {
 		return "", fmt.Errorf("failed to decode response: %w", err)

@@ -1,11 +1,10 @@
 package jobs
 
 import (
+	"arisubs/backend/models"
 	"sync"
-	"aytce/backend/models"
 )
 
-// DownloadQueueItem represents a queued video download
 type DownloadQueueItem struct {
 	Job     *models.Job
 	VideoID string
@@ -14,7 +13,6 @@ type DownloadQueueItem struct {
 	Task    func() error
 }
 
-// DownloadQueue manages video download queue (only one download at a time)
 type DownloadQueue struct {
 	mu           sync.Mutex
 	queue        []DownloadQueueItem
@@ -27,46 +25,54 @@ func NewDownloadQueue() *DownloadQueue {
 	}
 }
 
-// Enqueue adds a video download to the queue and starts processing if idle
+/*
+ * [Enqueue]
+ * - If queue is empty and nothing is processing, start immediately
+ *   - Not queued, processing immediately
+ * - Add to queue
+ * - Update job status to queued
+ * - If channel full, skip
+ * - Return true if was queued, false if processed immediately
+ */
 func (dq *DownloadQueue) Enqueue(item DownloadQueueItem) bool {
 	dq.mu.Lock()
 	defer dq.mu.Unlock()
 
-	// If queue is empty and nothing is processing, start immediately
 	if len(dq.queue) == 0 && dq.currentJobID == "" {
 		dq.currentJobID = item.Job.ID
 		dq.mu.Unlock()
 		dq.processItem(item)
 		dq.mu.Lock()
-		return false // Not queued, processing immediately
+		return false
 	}
 
-	// Add to queue
 	dq.queue = append(dq.queue, item)
-	
-	// Update job status to queued
+
 	item.Job.Status = models.JobPending
 	item.Job.Message = "Waiting in queue..."
 	select {
 	case item.Job.Updates <- models.JobUpdate{
-		Status:  models.JobPending,
-		Message: "Waiting in queue...",
+		Status:   models.JobPending,
+		Message:  "Waiting in queue...",
 		Progress: 0,
 	}:
 	default:
-		// Channel full, skip
 	}
-	
-	return true // Was queued
+
+	return true
 }
 
-// processItem processes a single download item
+/*
+ * [processItem]
+ * - Execute the download task
+ * - When done, clear current job and process next
+ * - Process next item if available
+ * - Error handling is done in the task itself
+ */
 func (dq *DownloadQueue) processItem(item DownloadQueueItem) {
-	// Execute the download task
 	go func() {
 		err := item.Task()
-		
-		// When done, clear current job and process next
+
 		dq.mu.Lock()
 		dq.currentJobID = ""
 		nextItem := DownloadQueueItem{}
@@ -79,41 +85,35 @@ func (dq *DownloadQueue) processItem(item DownloadQueueItem) {
 		}
 		dq.mu.Unlock()
 
-		// Process next item if available
 		if hasNext {
 			dq.processItem(nextItem)
 		}
-		
-		// Error handling is done in the task itself
+
 		_ = err
 	}()
 }
 
-// IsProcessing returns whether a download is currently in progress
 func (dq *DownloadQueue) IsProcessing() bool {
 	dq.mu.Lock()
 	defer dq.mu.Unlock()
 	return dq.currentJobID != ""
 }
 
-// GetQueueLength returns the number of items waiting in the queue
 func (dq *DownloadQueue) GetQueueLength() int {
 	dq.mu.Lock()
 	defer dq.mu.Unlock()
 	return len(dq.queue)
 }
 
-// GetQueuePosition returns the position of a video in the queue (0 = currently processing, 1+ = position in queue, -1 = not found)
 func (dq *DownloadQueue) GetQueuePosition(videoID string) int {
 	dq.mu.Lock()
 	defer dq.mu.Unlock()
-	
-	// Check queue position
+
 	for i, item := range dq.queue {
 		if item.VideoID == videoID {
-			return i + 1 // +1 because 0 would be currently processing
+			return i + 1
 		}
 	}
-	
+
 	return -1
 }

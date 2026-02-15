@@ -5,11 +5,18 @@ import (
 	"path/filepath"
 )
 
+/*
+ * [Config]
+ * - Handle environment variables
+ * - Define storage paths
+ * - Load configuration
+ */
+
 type Config struct {
-	Port            string
-	StoragePath     string
-	AllowedOrigins  []string
-	LibreTranslateURL string
+	Port                 string
+	StoragePath          string
+	AllowedOrigins       []string
+	LibreTranslateURL    string
 	LibreTranslateAPIKey string
 }
 
@@ -37,10 +44,10 @@ func Load() *Config {
 	libreTranslateAPIKey := os.Getenv("LIBRETRANSLATE_API_KEY")
 
 	return &Config{
-		Port:              port,
-		StoragePath:       storagePath,
-		AllowedOrigins:    origins,
-		LibreTranslateURL: libreTranslateURL,
+		Port:                 port,
+		StoragePath:          storagePath,
+		AllowedOrigins:       origins,
+		LibreTranslateURL:    libreTranslateURL,
 		LibreTranslateAPIKey: libreTranslateAPIKey,
 	}
 }

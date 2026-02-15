@@ -1,11 +1,12 @@
 package handlers
 
 import (
+	"arisubs/backend/jobs"
+	"arisubs/backend/models"
 	"fmt"
 	"net/http"
 	"time"
-	"aytce/backend/jobs"
-	"aytce/backend/models"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -17,6 +18,16 @@ func NewSSEHandler(queue *jobs.JobQueue) *SSEHandler {
 	return &SSEHandler{queue: queue}
 }
 
+/*
+ * [StreamJob]
+ * - Set SSE headers
+ * - If job is already done, send final update and return
+ * - Get request context to detect client disconnections
+ * - Send keepalive ping every 15 seconds
+ * - Channel to signal when done
+ * - Send keepalive pings
+ * - Stream job updates
+ */
 func (h *SSEHandler) StreamJob(c *gin.Context) {
 	jobID := c.Param("jobId")
 	job := h.queue.Get(jobID)
@@ -26,13 +37,11 @@ func (h *SSEHandler) StreamJob(c *gin.Context) {
 		return
 	}
 
-	// Set SSE headers
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	// If job is already done, send final update and return
 	if job.Status == models.JobDone || job.Status == models.JobError {
 		update := models.JobUpdate{
 			Status:   job.Status,
@@ -46,22 +55,16 @@ func (h *SSEHandler) StreamJob(c *gin.Context) {
 		return
 	}
 
-	// Get request context to detect client disconnections
 	ctx := c.Request.Context()
 
-	// Send keepalive ping every 15 seconds
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
-	// Channel to signal when done
 	done := make(chan bool, 1)
 
-	// Send keepalive pings
 	go func() {
 		defer func() {
-			// Recover from any panics (e.g., writing to closed connection)
 			if r := recover(); r != nil {
-				// Client disconnected, ignore
 			}
 		}()
 		for {
@@ -69,10 +72,8 @@ func (h *SSEHandler) StreamJob(c *gin.Context) {
 			case <-ticker.C:
 				select {
 				case <-ctx.Done():
-					// Client disconnected
 					return
 				default:
-					// Try to send ping, but don't error if connection is closed
 					if _, err := fmt.Fprintf(c.Writer, "data: {\"ping\":true}\n\n"); err != nil {
 						return
 					}
@@ -80,22 +81,18 @@ func (h *SSEHandler) StreamJob(c *gin.Context) {
 			case <-done:
 				return
 			case <-ctx.Done():
-				// Client disconnected
 				return
 			}
 		}
 	}()
 
-	// Stream job updates
 	for {
 		select {
 		case <-ctx.Done():
-			// Client disconnected
 			done <- true
 			return
 		case update, ok := <-job.Updates:
 			if !ok {
-				// Channel closed, send final update
 				update := models.JobUpdate{
 					Status:   job.Status,
 					Progress: job.Progress,
@@ -103,7 +100,6 @@ func (h *SSEHandler) StreamJob(c *gin.Context) {
 					Output:   job.Output,
 					Error:    job.Error,
 				}
-				// Try to send final update, but don't error if connection is closed
 				select {
 				case <-ctx.Done():
 					return
@@ -115,13 +111,11 @@ func (h *SSEHandler) StreamJob(c *gin.Context) {
 				return
 			}
 
-			// Check if client disconnected before sending
 			select {
 			case <-ctx.Done():
 				done <- true
 				return
 			default:
-				// Try to send update, but handle errors gracefully
 				c.SSEvent("message", update)
 			}
 

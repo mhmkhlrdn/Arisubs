@@ -1,6 +1,7 @@
 package services
 
 import (
+	"arisubs/backend/models"
 	"bufio"
 	"fmt"
 	"os"
@@ -9,7 +10,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"aytce/backend/models"
 )
 
 type FFmpegService struct{}
@@ -37,13 +37,19 @@ func (s *FFmpegService) ClipVideo(inputPath string, start float64, end float64, 
 	return nil
 }
 
+/*
+ * [ConcatVideos]
+ * - Just copy the single file if only one input
+ * - Create concat list file
+ * - Run ffmpeg concat
+ * - Parse progress from stderr
+ */
 func (s *FFmpegService) ConcatVideos(inputPaths []string, outputPath string, job *models.Job) error {
 	if len(inputPaths) == 0 {
 		return fmt.Errorf("no input files provided")
 	}
 
 	if len(inputPaths) == 1 {
-		// Just copy the single file
 		cmd := exec.Command("cp", inputPaths[0], outputPath)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to copy single file: %w", err)
@@ -57,7 +63,6 @@ func (s *FFmpegService) ConcatVideos(inputPaths []string, outputPath string, job
 		return nil
 	}
 
-	// Create concat list file
 	listFile := filepath.Join(filepath.Dir(outputPath), "concat_list.txt")
 	defer os.Remove(listFile)
 
@@ -76,7 +81,6 @@ func (s *FFmpegService) ConcatVideos(inputPaths []string, outputPath string, job
 	}
 	file.Close()
 
-	// Run ffmpeg concat
 	cmd := exec.Command("ffmpeg",
 		"-f", "concat",
 		"-safe", "0",
@@ -95,7 +99,6 @@ func (s *FFmpegService) ConcatVideos(inputPaths []string, outputPath string, job
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
-	// Parse progress from stderr
 	timeRegex := regexp.MustCompile(`time=(\d+):(\d+):(\d+\.\d+)`)
 	scanner := bufio.NewScanner(stderr)
 	go func() {
@@ -106,7 +109,6 @@ func (s *FFmpegService) ConcatVideos(inputPaths []string, outputPath string, job
 				minutes, _ := strconv.Atoi(matches[2])
 				seconds, _ := strconv.ParseFloat(matches[3], 64)
 				totalSeconds := float64(hours*3600+minutes*60) + seconds
-				// Estimate progress (rough, since we don't know total duration)
 				progress := int((totalSeconds / 100.0) * 100) // rough estimate
 				if progress > 100 {
 					progress = 100

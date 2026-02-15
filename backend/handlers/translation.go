@@ -1,8 +1,9 @@
 package handlers
 
 import (
+	"arisubs/backend/services"
 	"net/http"
-	"aytce/backend/services"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -26,6 +27,10 @@ type TranslateResponse struct {
 	TranslatedText string `json:"translatedText"`
 }
 
+/*
+ * [Translate]
+ * - Translate the text
+ */
 func (h *TranslationHandler) Translate(c *gin.Context) {
 	var req TranslateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -38,7 +43,6 @@ func (h *TranslationHandler) Translate(c *gin.Context) {
 		return
 	}
 
-	// Translate the text
 	translatedText, err := h.translationService.Translate(req.Text, req.SourceLanguage, req.TargetLanguage)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Translation failed", "details": err.Error()})

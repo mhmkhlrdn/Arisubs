@@ -1,14 +1,15 @@
 package handlers
 
 import (
+	"arisubs/backend/jobs"
+	"arisubs/backend/models"
+	"arisubs/backend/services"
+	"arisubs/backend/storage"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
-	"aytce/backend/jobs"
-	"aytce/backend/models"
-	"aytce/backend/services"
-	"aytce/backend/storage"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -30,6 +31,16 @@ type ExportResponse struct {
 	JobID string `json:"jobId"`
 }
 
+/*
+ * [ExportClips]
+ * - Create job
+ * - Submit export task
+ * - For each clip, ensure it's been clipped (or clip it now)
+ * - Check if clip file already exists (from /api/clip)
+ * - If clip doesn't exist, create it
+ * - Update progress
+ * - Concat all clips (or just copy if single)
+ */
 func (h *ExportHandler) ExportClips(c *gin.Context) {
 	var req models.ExportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -42,22 +53,15 @@ func (h *ExportHandler) ExportClips(c *gin.Context) {
 		return
 	}
 
-	// Create job
 	job := h.queue.New()
 	exportPath := h.store.ExportPath(job.ID)
 
-	// Submit export task
 	h.queue.Submit(job, func() error {
-		// For each clip, ensure it's been clipped (or clip it now)
 		clipPaths := make([]string, 0, len(req.Clips))
 
 		for i, clip := range req.Clips {
-			// Check if clip file already exists (from /api/clip)
-			// For now, we'll need to track clip IDs to file paths
-			// Simplified: assume clips need to be created
 			clipPath := h.store.ClipPath(clip.ID)
 
-			// If clip doesn't exist, create it
 			if !h.store.ClipExists(clip.ID) {
 				videoPath := h.store.VideoPath(clip.VideoID)
 				if err := h.ffmpeg.ClipVideo(videoPath, clip.Start, clip.End, clipPath); err != nil {
@@ -67,7 +71,6 @@ func (h *ExportHandler) ExportClips(c *gin.Context) {
 
 			clipPaths = append(clipPaths, clipPath)
 
-			// Update progress
 			progress := int((float64(i+1) / float64(len(req.Clips))) * 50) // First 50% for clipping
 			job.Updates <- models.JobUpdate{
 				Status:   models.JobProcessing,
@@ -76,13 +79,11 @@ func (h *ExportHandler) ExportClips(c *gin.Context) {
 			}
 		}
 
-		// Concat all clips
 		if len(clipPaths) > 1 {
 			if err := h.ffmpeg.ConcatVideos(clipPaths, exportPath, job); err != nil {
 				return err
 			}
 		} else {
-			// Single clip, just copy it
 			if err := h.ffmpeg.ConcatVideos(clipPaths, exportPath, job); err != nil {
 				return err
 			}
@@ -119,6 +120,14 @@ func (h *ExportHandler) DownloadExport(c *gin.Context) {
 	c.File(exportPath)
 }
 
+/*
+ * [ExportClipsIndividually]
+ * - Create job for tracking individual clip exports
+ * - Submit task to process all clips individually
+ * - If clip doesn't exist, create it
+ * - Update progress
+ * - Mark as done - clips are ready for individual download
+ */
 func (h *ExportHandler) ExportClipsIndividually(c *gin.Context) {
 	var req models.ExportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -131,15 +140,12 @@ func (h *ExportHandler) ExportClipsIndividually(c *gin.Context) {
 		return
 	}
 
-	// Create job for tracking individual clip exports
 	job := h.queue.New()
 
-	// Submit task to process all clips individually
 	h.queue.Submit(job, func() error {
 		for i, clip := range req.Clips {
 			clipPath := h.store.ClipPath(clip.ID)
 
-			// If clip doesn't exist, create it
 			if !h.store.ClipExists(clip.ID) {
 				videoPath := h.store.VideoPath(clip.VideoID)
 				if err := h.ffmpeg.ClipVideo(videoPath, clip.Start, clip.End, clipPath); err != nil {
@@ -147,7 +153,6 @@ func (h *ExportHandler) ExportClipsIndividually(c *gin.Context) {
 				}
 			}
 
-			// Update progress
 			progress := int((float64(i+1) / float64(len(req.Clips))) * 100)
 			job.Updates <- models.JobUpdate{
 				Status:   models.JobProcessing,
@@ -156,7 +161,6 @@ func (h *ExportHandler) ExportClipsIndividually(c *gin.Context) {
 			}
 		}
 
-		// Mark as done - clips are ready for individual download
 		job.Output = fmt.Sprintf(`{"clips":%d}`, len(req.Clips))
 		return nil
 	})
@@ -166,17 +170,20 @@ func (h *ExportHandler) ExportClipsIndividually(c *gin.Context) {
 	})
 }
 
+/*
+ * [DownloadClip]
+ * - Check if clip file exists
+ * - Use clip ID as filename, or extract from path
+ */
 func (h *ExportHandler) DownloadClip(c *gin.Context) {
 	clipID := c.Param("clipId")
 	clipPath := h.store.ClipPath(clipID)
 
-	// Check if clip file exists
 	if _, err := os.Stat(clipPath); os.IsNotExist(err) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Clip not found"})
 		return
 	}
 
-	// Use clip ID as filename, or extract from path
 	safeFilename := clipID + ".mp4"
 
 	c.Header("Content-Disposition", `attachment; filename="`+safeFilename+`"`)

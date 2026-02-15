@@ -1,9 +1,10 @@
 package jobs
 
 import (
+	"arisubs/backend/models"
 	"sync"
 	"time"
-	"aytce/backend/models"
+
 	"github.com/google/uuid"
 )
 
@@ -12,12 +13,15 @@ type JobQueue struct {
 	jobs map[string]*models.Job
 }
 
+/*
+ * [NewJobQueue]
+ * - Start background goroutine to prune old jobs
+ */
 func NewJobQueue() *JobQueue {
 	queue := &JobQueue{
 		jobs: make(map[string]*models.Job),
 	}
 
-	// Start background goroutine to prune old jobs
 	go queue.pruneOldJobs()
 
 	return queue
@@ -78,11 +82,14 @@ func (q *JobQueue) Get(id string) *models.Job {
 	return q.jobs[id]
 }
 
+/*
+ * [Push]
+ * - If channel is full, skip this update
+ */
 func (q *JobQueue) Push(job *models.Job, update models.JobUpdate) {
 	select {
 	case job.Updates <- update:
 	default:
-		// Channel is full, skip this update
 	}
 }
 
@@ -95,16 +102,19 @@ func (q *JobQueue) Delete(id string) {
 	}
 }
 
+/*
+ * [pruneOldJobs]
+ * - In a real implementation, you'd track job creation time
+ * - For now, we'll just prune jobs that are done or error and older than 30 minutes
+ * - This is simplified - you might want to add a CreatedAt field to Job
+ * - TODO: Implement actual job pruning based on CreatedAt timestamp
+ */
 func (q *JobQueue) pruneOldJobs() {
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		q.mu.Lock()
-		// In a real implementation, you'd track job creation time
-		// For now, we'll just prune jobs that are done or error and older than 30 minutes
-		// This is simplified - you might want to add a CreatedAt field to Job
-		// TODO: Implement actual job pruning based on CreatedAt timestamp
 		q.mu.Unlock()
 	}
 }
