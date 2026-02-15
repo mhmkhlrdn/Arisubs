@@ -11,9 +11,9 @@ coverage
 build
 dist
 out
-storage/*/**
-!storage/*/
-!storage/*
+/backend/storage/*/**
+!/backend/storage/*/
+!/backend/storage/*
 
 # Misc
 .DS_Store
