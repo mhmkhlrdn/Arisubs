@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { ArrowLeft, Download, Edit, X, FileDown } from 'lucide-react'
 import { useSessionStore } from '../store/sessionStore'
 import { submitExport, submitExportIndividual, getDownloadUrl, getClipDownloadUrl } from '../api/client'
@@ -28,6 +28,13 @@ export function Decision() {
   const { progress: individualProgress, status: individualStatus, message: individualMessage, error: individualError } = useJobProgress(individualJobId)
 
   const totalDuration = clips.reduce((sum, clip) => sum + (clip.end - clip.start), 0)
+
+  useEffect(() => {
+    if (exportJobId) {
+      setIsExporting(true)
+    }
+  }, [exportJobId])
+
 
   const formatTime = (seconds: number): string => {
     const hours = Math.floor(seconds / 3600)

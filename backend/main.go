@@ -41,7 +41,7 @@ func main() {
 
 	queue := jobs.NewJobQueue()
 
-	videoHandler := handlers.NewVideoHandler(queue, store, ytdlp)
+	videoHandler := handlers.NewVideoHandler(queue, store, ytdlp, ffmpeg)
 	clipHandler := handlers.NewClipHandler(queue, store, ffmpeg)
 	exportHandler := handlers.NewExportHandler(queue, store, ffmpeg)
 	translationHandler := handlers.NewTranslationHandler(translationService)
@@ -59,15 +59,19 @@ func main() {
 	api := router.Group("/api")
 	{
 		api.POST("/video", videoHandler.SubmitVideo)
+		api.POST("/video/upload", videoHandler.UploadVideo)
+		api.GET("/videos", videoHandler.ListVideos)
 		api.GET("/video/:id", videoHandler.GetVideo)
 		api.GET("/video/:id/file", videoHandler.ServeVideoFile)
 		api.HEAD("/video/:id/file", videoHandler.ServeVideoFile)
 		api.GET("/video/qualities", videoHandler.GetAvailableQualities)
+		api.POST("/video/:id/open-folder", videoHandler.OpenVideoFolder)
 
 		api.POST("/clip", clipHandler.CreateClip)
 
 		api.POST("/export", exportHandler.ExportClips)
 		api.POST("/export/individual", exportHandler.ExportClipsIndividually)
+		api.POST("/export/subtitles", exportHandler.ExportWithSubtitles)
 		api.GET("/export/:jobId/download", exportHandler.DownloadExport)
 		api.GET("/clip/:clipId/download", exportHandler.DownloadClip)
 

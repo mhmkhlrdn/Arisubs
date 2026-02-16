@@ -26,6 +26,27 @@ export async function submitVideoUrl(url: string, quality?: string): Promise<{ j
   })
 }
 
+export async function uploadVideo(file: File): Promise<{ videoId: string, video: Video }> {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const response = await fetch(`${API_BASE}/video/upload`, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }))
+    throw new Error(error.error || `HTTP ${response.status}`)
+  }
+
+  return response.json()
+}
+
+export async function listVideos(): Promise<Video[]> {
+  return fetchJSON<Video[]>(`${API_BASE}/videos`)
+}
+
 export async function getVideo(videoId: string): Promise<Video> {
   return fetchJSON<Video>(`${API_BASE}/video/${videoId}`)
 }
@@ -51,6 +72,35 @@ export async function submitExportIndividual(clips: Clip[]): Promise<{ jobId: st
   })
 }
 
+export async function submitExportWithSubtitles(videoId: string, start: number, end: number, assContent: string, label: string, fontFiles?: File[]): Promise<{ jobId: string }> {
+  // Use multipart form data when fonts are provided so FFmpeg can use them
+  if (fontFiles && fontFiles.length > 0) {
+    const formData = new FormData()
+    formData.append('videoId', videoId)
+    formData.append('start', String(start))
+    formData.append('end', String(end))
+    formData.append('assContent', assContent)
+    formData.append('label', label)
+    for (const f of fontFiles) {
+      formData.append('fonts', f)
+    }
+    const response = await fetch(`${API_BASE}/export/subtitles`, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Unknown error' }))
+      throw new Error(error.error || `HTTP ${response.status}`)
+    }
+    return response.json()
+  }
+  return fetchJSON<{ jobId: string }>(`${API_BASE}/export/subtitles`, {
+    method: 'POST',
+    body: JSON.stringify({ videoId, start, end, assContent, label }),
+  })
+}
+
+
 export function getClipDownloadUrl(clipId: string): string {
   return `${API_BASE}/clip/${clipId}/download`
 }
@@ -65,6 +115,10 @@ export function getDownloadUrl(jobId: string): string {
 
 export function getVideoFileUrl(videoId: string): string {
   return `${API_BASE}/video/${videoId}/file`
+}
+
+export async function openVideoFolder(videoId: string): Promise<void> {
+  await fetchJSON(`${API_BASE}/video/${videoId}/open-folder`, { method: 'POST' })
 }
 
 export async function getAvailableQualities(url: string): Promise<string[]> {

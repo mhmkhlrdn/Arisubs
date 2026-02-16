@@ -6,9 +6,12 @@ import (
 	"arisubs/backend/services"
 	"arisubs/backend/storage"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -189,4 +192,74 @@ func (h *ExportHandler) DownloadClip(c *gin.Context) {
 	c.Header("Content-Disposition", `attachment; filename="`+safeFilename+`"`)
 	c.Header("Content-Type", "video/mp4")
 	c.File(clipPath)
+}
+
+/*
+ * [ExportWithSubtitles]
+ * - Bind SubtitleExportRequest (JSON or multipart form data)
+ * - Save uploaded font files to a temp directory if provided
+ * - Create job for burn process
+ * - Call ffmpeg.BurnSubtitles with optional fonts directory
+ */
+func (h *ExportHandler) ExportWithSubtitles(c *gin.Context) {
+	var req models.SubtitleExportRequest
+	var fontsDir string
+
+	contentType := c.GetHeader("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		// Parse multipart form with font files
+		req.VideoID = c.PostForm("videoId")
+		req.AssContent = c.PostForm("assContent")
+		req.Label = c.PostForm("label")
+		if s, err := strconv.ParseFloat(c.PostForm("start"), 64); err == nil {
+			req.Start = s
+		}
+		if e, err := strconv.ParseFloat(c.PostForm("end"), 64); err == nil {
+			req.End = e
+		}
+
+		// Save uploaded font files to a temp directory
+		form, err := c.MultipartForm()
+		if err == nil && form.File["fonts"] != nil {
+			tmpDir, err := os.MkdirTemp("", "arisubs-fonts-*")
+			if err == nil {
+				fontsDir = tmpDir
+				for _, fh := range form.File["fonts"] {
+					dst := filepath.Join(tmpDir, fh.Filename)
+					if err := c.SaveUploadedFile(fh, dst); err != nil {
+						log.Printf("[Export] Failed to save font file %s: %v", fh.Filename, err)
+					} else {
+						log.Printf("[Export] Saved font file: %s", dst)
+					}
+				}
+			}
+		}
+	} else {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+			return
+		}
+	}
+
+	if req.VideoID == "" || req.AssContent == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing videoId or assContent"})
+		return
+	}
+
+	job := h.queue.New()
+	exportPath := h.store.ExportPath(job.ID)
+	videoPath := h.store.VideoPath(req.VideoID)
+
+	capturedFontsDir := fontsDir
+	h.queue.Submit(job, func() error {
+		// Clean up temp fonts directory after burn completes
+		if capturedFontsDir != "" {
+			defer os.RemoveAll(capturedFontsDir)
+		}
+		return h.ffmpeg.BurnSubtitles(videoPath, req.AssContent, req.Start, req.End, exportPath, job, capturedFontsDir)
+	})
+
+	c.JSON(http.StatusOK, ExportResponse{
+		JobID: job.ID,
+	})
 }

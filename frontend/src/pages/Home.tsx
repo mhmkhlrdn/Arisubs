@@ -1,8 +1,10 @@
 import { useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { submitVideoUrl, getAvailableQualities } from '../api/client'
+import { submitVideoUrl, getAvailableQualities, uploadVideo, listVideos } from '../api/client'
 import { useSessionStore } from '../store/sessionStore'
+import { Upload, Youtube, Play } from 'lucide-react'
+import type { Video } from '../types'
 import '../styles/main.css'
 
 /**
@@ -28,6 +30,9 @@ export function Home() {
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [isLoadingQualities, setIsLoadingQualities] = useState(false)
+  const [activeTab, setActiveTab] = useState<'youtube' | 'local'>('youtube')
+  const [isRecentMenuOpen, setIsRecentMenuOpen] = useState(false)
+  const [recentVideos, setRecentVideos] = useState<Video[]>([])
   const navigate = useNavigate()
   const { setActiveVideo } = useSessionStore()
 
@@ -100,13 +105,114 @@ export function Home() {
     }
   }
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    if (!file.type.startsWith('video/')) {
+      setError('Please select a valid video file')
+      return
+    }
+
+    setIsLoading(true)
+    setError('')
+
+    try {
+      const { videoId, video } = await uploadVideo(file)
+      setActiveVideo(video)
+      navigate(`/editor/${videoId}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to upload video')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const toggleRecentMenu = async () => {
+    if (!isRecentMenuOpen) {
+      try {
+        const videos = await listVideos()
+        setRecentVideos(videos)
+      } catch (err) {
+        console.error('Failed to fetch recent videos:', err)
+      }
+    }
+    setIsRecentMenuOpen(!isRecentMenuOpen)
+  }
+
+  const handleRecentClick = (video: Video) => {
+    setActiveVideo(video)
+    navigate(`/editor/${video.id}`)
+    setIsRecentMenuOpen(false)
+  }
+
   return (
     <div className="main-container">
       <div className="main-menubar">
-        <span className="main-menu-item">File</span>
-        <span className="main-menu-item">Recent</span>
-        <span className="main-menu-item">Options</span>
-        <span className="main-menu-item">Help</span>
+        <div style={{ position: 'relative' }}>
+          <span
+            className={`main-menu-item ${isRecentMenuOpen ? 'active' : ''}`}
+            onClick={toggleRecentMenu}
+          >
+            Recent
+          </span>
+          {isRecentMenuOpen && (
+            <div style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              background: '#1e1e2e',
+              border: '1px solid #313244',
+              borderRadius: '4px',
+              padding: '4px',
+              zIndex: 1000,
+              minWidth: '240px',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.5)',
+              maxHeight: '400px',
+              overflowY: 'auto'
+            }}>
+              <div style={{ padding: '8px 12px', fontSize: 11, fontWeight: 600, color: '#585b70', borderBottom: '1px solid #313244', marginBottom: 4 }}>
+                RECENT VIDEOS
+              </div>
+              {recentVideos.length === 0 ? (
+                <div style={{ padding: '12px', fontSize: 12, color: '#6c7086', textAlign: 'center' }}>
+                  No recent videos
+                </div>
+              ) : (
+                recentVideos.map((video) => (
+                  <button
+                    key={video.id}
+                    style={{
+                      textAlign: 'left',
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#cdd6f4',
+                      padding: '8px 12px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '2px',
+                      width: '100%',
+                      borderRadius: '2px'
+                    }}
+                    className="hover:bg-[#313244]"
+                    onClick={() => handleRecentClick(video)}
+                  >
+                    <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%' }}>
+                      {video.title || `Video ${video.id}`}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#6c7086', display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <Play size={10} /> {video.id}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="main-landing">
@@ -120,53 +226,107 @@ export function Home() {
             Arisubs
           </h1>
 
-          <form onSubmit={handleSubmit} className="main-grid-placeholder">
-            <div className="main-section-title">Import Video</div>
-            <input
-              type="text"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="Paste YouTube URL (e.g., https://youtu.be/...)"
-              className="main-input main-input-lg"
-              disabled={isLoading}
-            />
-
-            <div className="main-editbox-row" style={{ marginBottom: 12 }}>
-              <span className="main-label" style={{ fontSize: 13 }}>Quality:</span>
-              <select
-                value={quality}
-                onChange={(e) => setQuality(e.target.value)}
-                className="main-select"
-                style={{ height: 32, fontSize: 13, flex: 1 }}
-                disabled={isLoading || isLoadingQualities}
+          <div className="main-grid-placeholder">
+            <div style={{ display: 'flex', gap: 12, marginBottom: 20, borderBottom: '1px solid #313244', paddingBottom: 12 }}>
+              <button
+                className={`main-tbtn ${activeTab === 'youtube' ? 'main-tbtn-active' : ''}`}
+                style={{ flex: 1, height: 36 }}
+                onClick={() => setActiveTab('youtube')}
               >
-                {isLoadingQualities ? (
-                  <option value="best">Detecting streams...</option>
-                ) : (
-                  availableQualities.map((q) => (
-                    <option key={q} value={q}>
-                      {q === 'best' ? 'Best Quality' : q === 'worst' ? 'Efficiency Mode' : q}
-                    </option>
-                  ))
-                )}
-              </select>
+                <Youtube size={16} /> YouTube
+              </button>
+              <button
+                className={`main-tbtn ${activeTab === 'local' ? 'main-tbtn-active' : ''}`}
+                style={{ flex: 1, height: 36 }}
+                onClick={() => setActiveTab('local')}
+              >
+                <Upload size={16} /> Local File
+              </button>
             </div>
 
-            {error && (
-              <div style={{ background: 'rgba(243,139,168,0.15)', border: '1px solid #f38ba8', color: '#f38ba8', padding: '10px', borderRadius: '4px', fontSize: '13px', marginBottom: '12px' }}>
-                {error}
+            {activeTab === 'youtube' ? (
+              <form onSubmit={handleSubmit}>
+                <div className="main-section-title">Import Video</div>
+                <input
+                  type="text"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="Paste YouTube URL (e.g., https://youtu.be/...)"
+                  className="main-input main-input-lg"
+                  disabled={isLoading}
+                  style={{ marginBottom: 12 }}
+                />
+
+                <div className="main-editbox-row" style={{ marginBottom: 12 }}>
+                  <span className="main-label" style={{ fontSize: 13 }}>Quality:</span>
+                  <select
+                    value={quality}
+                    onChange={(e) => setQuality(e.target.value)}
+                    className="main-select"
+                    style={{ height: 32, fontSize: 13, flex: 1 }}
+                    disabled={isLoading || isLoadingQualities}
+                  >
+                    {isLoadingQualities ? (
+                      <option value="best">Detecting streams...</option>
+                    ) : (
+                      availableQualities.map((q) => (
+                        <option key={q} value={q}>
+                          {q === 'best' ? 'Best Quality' : q === 'worst' ? 'Efficiency Mode' : q}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
+
+                {error && activeTab === 'youtube' && (
+                  <div style={{ background: 'rgba(243,139,168,0.15)', border: '1px solid #f38ba8', color: '#f38ba8', padding: '10px', borderRadius: '4px', fontSize: '13px', marginBottom: '12px' }}>
+                    {error}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="main-tbtn main-tbtn-primary main-btn-lg"
+                  style={{ padding: '12px', fontSize: 15, width: '100%' }}
+                >
+                  {isLoading ? 'Initializing...' : 'Open Video'}
+                </button>
+              </form>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '20px 0' }}>
+                <div className="main-section-title" style={{ marginBottom: 20 }}>Upload local MP4</div>
+                <label className="main-tbtn main-tbtn-primary main-btn-lg" style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 12,
+                  height: 120,
+                  cursor: 'pointer',
+                  border: '2px dashed #313244',
+                  background: 'rgba(49, 50, 68, 0.2)',
+                  fontSize: 16
+                }}>
+                  <Upload size={32} />
+                  <span>{isLoading ? 'Uploading...' : 'Click to select file'}</span>
+                  <input
+                    type="file"
+                    accept="video/mp4,video/x-m4v,video/*"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    disabled={isLoading}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+                {error && activeTab === 'local' && (
+                  <div style={{ background: 'rgba(243,139,168,0.15)', border: '1px solid #f38ba8', color: '#f38ba8', padding: '10px', borderRadius: '4px', fontSize: '13px', marginTop: '12px' }}>
+                    {error}
+                  </div>
+                )}
               </div>
             )}
-
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="main-tbtn main-tbtn-primary main-btn-lg"
-              style={{ padding: '12px', fontSize: 15 }}
-            >
-              {isLoading ? 'Initializing...' : 'Open Video'}
-            </button>
-          </form>
+          </div>
 
           <div style={{ marginTop: 24, fontSize: 11, color: '#585b70', textAlign: 'center' }}>
             Version 1.0.0

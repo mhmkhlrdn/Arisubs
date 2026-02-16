@@ -3,10 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import {
   Bold, Italic, Underline, Strikethrough, Type, Scan, Languages,
   Play, Pause, Download, Plus, X, SkipBack, SkipForward,
-  ZoomIn, ZoomOut, Upload
+  ZoomIn, ZoomOut, Upload, Clock
 } from 'lucide-react'
 import { useSessionStore } from '../store/sessionStore'
-import { getVideoFileUrl } from '../api/client'
+import { getVideoFileUrl, submitExportWithSubtitles } from '../api/client'
 import {
   TextOverlay,
   type TextOverlayData,
@@ -76,6 +76,124 @@ function cps(o: TextOverlayData): number {
 
 interface UndoSnap { overlays: TextOverlayData[]; desc: string }
 
+/* ── ASS subtitle export ─────────────────────────── */
+function rgbToABGR(hex: string, opacity: number = 1): string {
+  const r = hex.slice(1, 3), g = hex.slice(3, 5), b = hex.slice(5, 7)
+  const a = Math.round((1 - opacity) * 255).toString(16).padStart(2, '0').toUpperCase()
+  return `&H${a}${b.toUpperCase()}${g.toUpperCase()}${r.toUpperCase()}`
+}
+
+function exportOverlaysAsASS(overlays: TextOverlayData[], clipLabel: string, containerW: number, containerH: number): string {
+  const targetW = 1920
+  const targetH = 1080
+  const scaleX = targetW / (containerW || 1)
+  const scaleY = targetH / (containerH || 1)
+  const scaleFont = targetH / (containerH || 1)
+
+  const lines: string[] = []
+  lines.push('[Script Info]')
+  lines.push(`Title: ${clipLabel || 'Subtitle'}`)
+  lines.push('ScriptType: v4.00+')
+  lines.push('WrapStyle: 0')
+  lines.push(`PlayResX: ${targetW}`)
+  lines.push(`PlayResY: ${targetH}`)
+  lines.push('')
+  lines.push('[V4+ Styles]')
+  lines.push('Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding')
+
+  overlays.forEach((o, i) => {
+    const styleName = `Style${i + 1}`
+    const opacity = o.opacity ?? 1
+    const primary = rgbToABGR(o.color || '#FFFFFF', opacity)
+    const secondary = '&H000000FF'
+    const outline = rgbToABGR(o.outlineEnabled ? (o.outlineColor || '#000000') : '#000000', opacity)
+    // BackColour: use background color when bgEnabled, otherwise use outline color for shadow
+    const back = o.bgEnabled
+      ? rgbToABGR(o.backgroundColor || '#000000', opacity)
+      : rgbToABGR('#000000', o.outlineEnabled ? opacity : 0.8)
+
+    // Match editor's bold/italic/underline/strikeout
+    const fw = o.fontWeight ?? 400
+    const boldValue = fw >= 700 ? -1 : 0
+    const isItalic = o.fontStyle === 'italic' ? -1 : 0
+    const isUnderline = o.textDecoration?.includes('underline') ? -1 : 0
+    const isStrikeOut = o.textDecoration?.includes('line-through') ? -1 : 0
+
+    const borderStyle = o.bgEnabled ? 3 : 1
+    // ASS Outline is the border width in pixels (not doubled like CSS -webkit-text-stroke)
+    // In the editor, -webkit-text-stroke is w*2 because stroke extends both inside and outside,
+    // but ASS Outline extends only outward, so use the raw width value
+    const outlineW = Math.round((o.outlineEnabled ? (o.outlineWidth ?? 2) : 0) * scaleFont)
+
+    // Match editor's default shadow logic
+    let shadowW = 0
+    if (!o.outlineEnabled && !o.bgEnabled && !o.gradientEnabled) {
+      shadowW = Math.round(2 * scaleFont)
+    }
+    if (o.textShadowCustom) {
+      shadowW = Math.round(2 * scaleFont)
+    }
+
+    const fontSize = Math.round((o.fontSize || 32) * scaleFont)
+    const spacing = Math.round((o.letterSpacing ?? 0) * scaleFont)
+
+    lines.push(`Style: ${styleName},${o.fontFamily || 'Arial'},${fontSize},${primary},${secondary},${outline},${back},${boldValue},${isItalic},${isUnderline},${isStrikeOut},100,100,${spacing},0,${borderStyle},${outlineW},${shadowW},7,10,10,10,1`)
+  })
+
+  lines.push('')
+  lines.push('[Events]')
+  lines.push('Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text')
+
+  overlays.forEach((o, i) => {
+    const styleName = `Style${i + 1}`
+    const start = fmtTime(o.startTime)
+    const end = fmtTime(o.endTime)
+    let text = o.text.replace(/\n/g, '\\N')
+    const posX = Math.round(o.x * scaleX)
+    const posY = Math.round(o.y * scaleY)
+    text = `{\\pos(${posX},${posY})}${text}`
+
+    // If secondary outline is enabled, render it as a separate bottom-layer dialogue line
+    // with a larger border in the secondary color, behind the main text
+    if (o.secondaryOutlineEnabled) {
+      const secOutlineW = Math.round(((o.outlineWidth || 2) + (o.secondaryOutlineWidth || 2)) * scaleFont)
+      const secColor = rgbToABGR(o.secondaryOutlineColor || '#FF0000', o.opacity ?? 1)
+      // Override tags: set outline color and width for the secondary border layer
+      const secText = o.text.replace(/\n/g, '\\N')
+      const secOverride = `{\\pos(${posX},${posY})\\3c${secColor}\\bord${secOutlineW}}`
+      lines.push(`Dialogue: 0,${start},${end},${styleName},,0,0,0,,${secOverride}${secText}`)
+      // Main text on a higher layer
+      lines.push(`Dialogue: 1,${start},${end},${styleName},,0,0,0,,${text}`)
+    } else {
+      lines.push(`Dialogue: 0,${start},${end},${styleName},,0,0,0,,${text}`)
+    }
+  })
+  return lines.join('\n')
+}
+
+
+
+function exportOverlaysAsSRT(overlays: TextOverlayData[]): string {
+  const fmtSRTTime = (sec: number): string => {
+    const h = Math.floor(sec / 3600)
+    const m = Math.floor((sec % 3600) / 60)
+    const s = Math.floor(sec % 60)
+    const ms = Math.floor((sec % 1) * 1000)
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`
+  }
+
+  return overlays
+    .sort((a, b) => a.startTime - b.startTime)
+    .map((o, i) => {
+      const start = fmtSRTTime(o.startTime)
+      const end = fmtSRTTime(o.endTime)
+      const text = o.text.replace(/\\N/g, '\n').replace(/\{[^}]+\}/g, '') // remove tags for SRT
+      return `${i + 1}\n${start} --> ${end}\n${text}\n`
+    })
+    .join('\n')
+}
+
+
 export function TranslationTimelineEditor() {
   const navigate = useNavigate()
   const { clips } = useSessionStore()
@@ -90,12 +208,17 @@ export function TranslationTimelineEditor() {
   const videoSrc = videoId ? getVideoFileUrl(videoId) : null
 
   const [customFonts, setCustomFonts] = useState<CustomFont[]>([])
+  const customFontFiles = useRef<File[]>([])
   const fontInputRef = useRef<HTMLInputElement>(null)
   const allFonts = getAllFonts(customFonts)
   const handleFontImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files; if (!files) return
     for (const file of Array.from(files)) {
-      try { const cf = await loadFontFromFile(file); setCustomFonts(prev => [...prev, cf]) }
+      try {
+        const cf = await loadFontFromFile(file)
+        setCustomFonts(prev => [...prev, cf])
+        customFontFiles.current.push(file)
+      }
       catch (err) { console.error('Failed to load font:', err) }
     }
     e.target.value = ''
@@ -164,6 +287,7 @@ export function TranslationTimelineEditor() {
   }, [redoStack, overlays])
 
   const [topH, setTopH] = useState(320)
+  const [videoPanelW, setVideoPanelW] = useState(420)
 
   const sel = overlays.find(o => o.id === selectedId) ?? null
   const selIdx = sel ? overlays.findIndex(o => o.id === selectedId) : -1
@@ -198,10 +322,41 @@ export function TranslationTimelineEditor() {
   const addOverlay = useCallback(() => {
     pushUndo('add')
     const rt = selectedClip ? currentTime - selectedClip.start : currentTime
-    const nw = createDefaultOverlay(Math.max(0, rt))
-    setOverlays(prev => [...prev, nw])
-    setSelectedId(nw.id); setSelectedIds(new Set([nw.id]))
-  }, [pushUndo, currentTime, selectedClip])
+    const base = createDefaultOverlay(Math.max(0, rt))
+    // Copy styling from the last overlay if one exists
+    if (overlays.length > 0) {
+      const prev = overlays[overlays.length - 1]
+      base.fontFamily = prev.fontFamily
+      base.fontSize = prev.fontSize
+      base.color = prev.color
+      base.backgroundColor = prev.backgroundColor
+      base.opacity = prev.opacity
+      base.animation = prev.animation
+      base.animationDuration = prev.animationDuration
+      base.animationConfig = { ...prev.animationConfig }
+      base.fontWeight = prev.fontWeight
+      base.fontStyle = prev.fontStyle
+      base.letterSpacing = prev.letterSpacing
+      base.lineHeight = prev.lineHeight
+      base.padding = prev.padding
+      base.borderRadius = prev.borderRadius
+      base.bgEnabled = prev.bgEnabled
+      base.outlineEnabled = prev.outlineEnabled
+      base.outlineColor = prev.outlineColor
+      base.outlineWidth = prev.outlineWidth
+      base.secondaryOutlineEnabled = prev.secondaryOutlineEnabled
+      base.secondaryOutlineColor = prev.secondaryOutlineColor
+      base.secondaryOutlineWidth = prev.secondaryOutlineWidth
+      base.gradientEnabled = prev.gradientEnabled
+      base.gradientColors = prev.gradientColors ? [...prev.gradientColors] : undefined
+      base.gradientAngle = prev.gradientAngle
+      base.textShadowCustom = prev.textShadowCustom
+      base.x = prev.x
+      base.y = prev.y
+    }
+    setOverlays(prev => [...prev, base])
+    setSelectedId(base.id); setSelectedIds(new Set([base.id]))
+  }, [pushUndo, currentTime, selectedClip, overlays])
 
   const deleteSelected = useCallback(() => {
     pushUndo('delete')
@@ -237,6 +392,167 @@ export function TranslationTimelineEditor() {
   }, [sel, relTime, pushUndo, updateOverlay])
   const setEndToCurrent = useCallback(() => {
     if (!sel) return; pushUndo('set end'); updateOverlay(sel.id, { endTime: relTime })
+  }, [sel, relTime, pushUndo, updateOverlay])
+
+  /* ── Timing menu state & actions (Aegisub-style) ── */
+  const [showTimingMenu, setShowTimingMenu] = useState(false)
+  const [showExportMenu, setShowExportMenu] = useState(false)
+  const [showShiftDialog, setShowShiftDialog] = useState(false)
+  const [shiftAmount, setShiftAmount] = useState('0:00:00.00')
+  const [shiftDir, setShiftDir] = useState<'forward' | 'backward'>('forward')
+  const [shiftScope, setShiftScope] = useState<'all' | 'selected' | 'onward'>('all')
+  const [shiftFields, setShiftFields] = useState<'both' | 'start' | 'end'>('both')
+
+  const handleExportASS = useCallback(() => {
+    if (overlays.length === 0) return
+    const container = videoRef.current?.parentElement
+    const cw = container?.clientWidth || 1920
+    const ch = container?.clientHeight || 1080
+
+    const ass = exportOverlaysAsASS(overlays, selectedClip?.label || 'subtitle', cw, ch)
+    const blob = new Blob([ass], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${selectedClip?.label || 'subtitle'}.ass`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    setShowExportMenu(false)
+  }, [overlays, selectedClip])
+
+  const handleExportSRT = useCallback(() => {
+    if (overlays.length === 0) return
+    const srt = exportOverlaysAsSRT(overlays)
+    const blob = new Blob([srt], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${selectedClip?.label || 'subtitle'}.srt`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    setShowExportMenu(false)
+  }, [overlays, selectedClip])
+
+  const { setExportJobId } = useSessionStore()
+  const handleExportVideoWithSubtitles = useCallback(async () => {
+    if (!selectedClip || !videoId) return
+    const container = videoRef.current?.parentElement
+    const cw = container?.clientWidth || 1920
+    const ch = container?.clientHeight || 1080
+
+    const ass = exportOverlaysAsASS(overlays, selectedClip.label, cw, ch)
+    // Send all custom font files to the backend so FFmpeg's libass can find them by internal family name
+    const fontsToSend = customFontFiles.current.length > 0 ? customFontFiles.current : undefined
+    try {
+      const { jobId } = await submitExportWithSubtitles(videoId, selectedClip.start, selectedClip.end, ass, selectedClip.label, fontsToSend)
+      setExportJobId(jobId)
+      navigate('/decision')
+    } catch (err) {
+      console.error('Failed to export video with subtitles:', err)
+      alert('Failed to start video export. Check console.')
+    }
+    setShowExportMenu(false)
+  }, [overlays, selectedClip, videoId, navigate, setExportJobId])
+
+
+
+  const applyShiftTimes = useCallback(() => {
+    const delta = parseTime(shiftAmount) * (shiftDir === 'backward' ? -1 : 1)
+    if (delta === 0) { setShowShiftDialog(false); return }
+    pushUndo('shift times')
+    setOverlays(prev => {
+      const selOnwardIdx = selIdx >= 0 ? selIdx : 0
+      return prev.map((o, i) => {
+        const inScope = shiftScope === 'all' || (shiftScope === 'selected' && selectedIds.has(o.id)) || (shiftScope === 'onward' && i >= selOnwardIdx)
+        if (!inScope) return o
+        const nw = { ...o }
+        if (shiftFields === 'both' || shiftFields === 'start') nw.startTime = Math.max(0, o.startTime + delta)
+        if (shiftFields === 'both' || shiftFields === 'end') nw.endTime = Math.max(0, o.endTime + delta)
+        return nw
+      })
+    })
+    setShowShiftDialog(false)
+  }, [shiftAmount, shiftDir, shiftScope, shiftFields, pushUndo, selectedIds, selIdx])
+
+  const sortByTime = useCallback(() => {
+    pushUndo('sort by time')
+    setOverlays(prev => [...prev].sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime))
+  }, [pushUndo])
+
+  const addLeadIn = useCallback((ms: number) => {
+    pushUndo('lead-in')
+    const delta = ms / 1000
+    setOverlays(prev => prev.map(o => {
+      if (shiftScope === 'selected' && !selectedIds.has(o.id)) return o
+      return { ...o, startTime: Math.max(0, o.startTime - delta) }
+    }))
+  }, [pushUndo, selectedIds, shiftScope])
+
+  const addLeadOut = useCallback((ms: number) => {
+    pushUndo('lead-out')
+    const delta = ms / 1000
+    setOverlays(prev => prev.map(o => {
+      if (shiftScope === 'selected' && !selectedIds.has(o.id)) return o
+      return { ...o, endTime: o.endTime + delta }
+    }))
+  }, [pushUndo, selectedIds, shiftScope])
+
+  const makeTimesContinuous = useCallback(() => {
+    if (overlays.length < 2) return
+    pushUndo('make continuous')
+    setOverlays(prev => {
+      const sorted = [...prev].sort((a, b) => a.startTime - b.startTime)
+      for (let i = 0; i < sorted.length - 1; i++) {
+        if (sorted[i].endTime < sorted[i + 1].startTime) {
+          const gap = sorted[i + 1].startTime - sorted[i].endTime
+          if (gap < 2) sorted[i].endTime = sorted[i + 1].startTime
+        }
+      }
+      return sorted
+    })
+  }, [overlays, pushUndo])
+
+  const snapStartToKeyframe = useCallback(() => {
+    if (!sel) return
+    pushUndo('snap start')
+    const snapped = Math.round(sel.startTime * 30) / 30
+    updateOverlay(sel.id, { startTime: snapped })
+  }, [sel, pushUndo, updateOverlay])
+
+  const snapEndToKeyframe = useCallback(() => {
+    if (!sel) return
+    pushUndo('snap end')
+    const snapped = Math.round(sel.endTime * 30) / 30
+    updateOverlay(sel.id, { endTime: snapped })
+  }, [sel, pushUndo, updateOverlay])
+
+  const joinWithNext = useCallback(() => {
+    if (!sel || selIdx >= overlays.length - 1) return
+    pushUndo('join')
+    const next = overlays[selIdx + 1]
+    updateOverlay(sel.id, { endTime: next.endTime, text: sel.text + '\\N' + next.text })
+    setOverlays(prev => prev.filter(o => o.id !== next.id))
+  }, [sel, selIdx, overlays, pushUndo, updateOverlay])
+
+  const splitAtCurrent = useCallback(() => {
+    if (!sel || relTime <= sel.startTime || relTime >= sel.endTime) return
+    pushUndo('split')
+    const newOv: TextOverlayData = {
+      ...sel,
+      id: crypto.randomUUID(),
+      startTime: relTime,
+      text: '',
+    }
+    updateOverlay(sel.id, { endTime: relTime })
+    setOverlays(prev => {
+      const idx = prev.findIndex(o => o.id === sel.id)
+      const n = [...prev]; n.splice(idx + 1, 0, newOv); return n
+    })
+    setSelectedId(newOv.id); setSelectedIds(new Set([newOv.id]))
   }, [sel, relTime, pushUndo, updateOverlay])
 
   const playRange = useCallback((s: number, e: number) => {
@@ -279,7 +595,15 @@ export function TranslationTimelineEditor() {
     const handler = (e: KeyboardEvent) => {
       const inp = (e.target as HTMLElement).tagName
       const isInput = inp === 'INPUT' || inp === 'TEXTAREA' || inp === 'SELECT'
-      if (e.ctrlKey && !e.altKey) {
+      if (e.ctrlKey && e.shiftKey && !e.altKey) {
+        switch (e.key.toLowerCase()) {
+          case 't': e.preventDefault(); setShowShiftDialog(true); return
+          case 's': e.preventDefault(); splitAtCurrent(); return
+          case '3': e.preventDefault(); snapStartToKeyframe(); return
+          case '4': e.preventDefault(); snapEndToKeyframe(); return
+        }
+      }
+      if (e.ctrlKey && !e.altKey && !e.shiftKey) {
         switch (e.key.toLowerCase()) {
           case 'z': e.preventDefault(); undo(); return
           case 'y': e.preventDefault(); redo(); return
@@ -311,7 +635,7 @@ export function TranslationTimelineEditor() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [undo, redo, commitNext, commitStay, togglePlay, setStartToCurrent, setEndToCurrent, deleteSelected, sel, playRange, goNext, goPrev, addOverlay, selectedClip])
+  }, [undo, redo, commitNext, commitStay, togglePlay, setStartToCurrent, setEndToCurrent, deleteSelected, sel, playRange, goNext, goPrev, addOverlay, selectedClip, splitAtCurrent, snapStartToKeyframe, snapEndToKeyframe])
 
   const handleResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault(); const startY = e.clientY; const startH = topH
@@ -319,6 +643,13 @@ export function TranslationTimelineEditor() {
     const onU = () => { window.removeEventListener('mousemove', onM); window.removeEventListener('mouseup', onU) }
     window.addEventListener('mousemove', onM); window.addEventListener('mouseup', onU)
   }, [topH])
+
+  const handleVideoPanelResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault(); const startX = e.clientX; const startW = videoPanelW
+    const onM = (ev: MouseEvent) => setVideoPanelW(Math.max(280, Math.min(800, startW + ev.clientX - startX)))
+    const onU = () => { window.removeEventListener('mousemove', onM); window.removeEventListener('mouseup', onU) }
+    window.addEventListener('mousemove', onM); window.addEventListener('mouseup', onU)
+  }, [videoPanelW])
 
   const [locText, setLocText] = useState('')
   const [locStart, setLocStart] = useState('')
@@ -407,12 +738,15 @@ export function TranslationTimelineEditor() {
     const data = audioBuffer.getChannelData(0)
     const samplesPerPixel = Math.max(1, Math.floor(audioBuffer.sampleRate / hZoom))
     const amp = viewportH / 2
+    // Clip the audio rendering to the clip duration
+    const clipStart = selectedClip ? selectedClip.start : 0
 
     if (audioMode === 'waveform') {
       ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1; ctx.beginPath()
       for (let x = 0; x < viewportW; x++) {
         const timeAtX = (scrollX + x) / hZoom
-        const sampleIdx = Math.floor(timeAtX * audioBuffer.sampleRate)
+        if (timeAtX > clipDuration) break
+        const sampleIdx = Math.floor((clipStart + timeAtX) * audioBuffer.sampleRate)
         if (sampleIdx >= data.length) break
 
         let min = 1.0, max = -1.0
@@ -425,7 +759,8 @@ export function TranslationTimelineEditor() {
     } else {
       for (let x = 0; x < viewportW; x++) {
         const timeAtX = (scrollX + x) / hZoom
-        const sampleIdx = Math.floor(timeAtX * audioBuffer.sampleRate)
+        if (timeAtX > clipDuration) break
+        const sampleIdx = Math.floor((clipStart + timeAtX) * audioBuffer.sampleRate)
         if (sampleIdx >= data.length) break
         let sum = 0
         for (let i = 0; i < samplesPerPixel; i++) sum += Math.abs(data[sampleIdx + i] || 0)
@@ -465,7 +800,13 @@ export function TranslationTimelineEditor() {
       ctx.fillStyle = '#fff'
       ctx.beginPath(); ctx.moveTo(px - 4, 0); ctx.lineTo(px + 4, 0); ctx.lineTo(px, 6); ctx.closePath(); ctx.fill()
     }
-  }, [audioBuffer, hZoom, overlays, sel, isModified, relTime, scrollX, audioMode])
+    // Draw clip duration boundary marker
+    const clipEndX = clipDuration * hZoom - scrollX
+    if (clipEndX >= 0 && clipEndX <= viewportW) {
+      ctx.strokeStyle = '#f38ba8'; ctx.lineWidth = 2; ctx.setLineDash([4, 4])
+      ctx.beginPath(); ctx.moveTo(clipEndX, 0); ctx.lineTo(clipEndX, viewportH); ctx.stroke(); ctx.setLineDash([])
+    }
+  }, [audioBuffer, hZoom, overlays, sel, isModified, relTime, scrollX, audioMode, clipDuration, selectedClip])
 
 
   useEffect(() => {
@@ -473,14 +814,80 @@ export function TranslationTimelineEditor() {
   }, [relTime])
 
 
-  const handleAudioClick = (e: React.MouseEvent, btn: number) => {
-    if (!audioContainerRef.current || !sel) return
-    const r = audioCanvasRef.current!.getBoundingClientRect()
-    const time = (e.clientX - r.left) / hZoom
-    pushUndo('set time')
-    if (btn === 0) updateOverlay(sel.id, { startTime: Math.max(0, time) })
-    else if (btn === 2) updateOverlay(sel.id, { endTime: Math.max(0, time) })
-  }
+  const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
+
+  const seekToAudioPosition = useCallback((e: React.MouseEvent | MouseEvent) => {
+    if (!audioCanvasRef.current || !videoRef.current || !selectedClip) return
+    const r = audioCanvasRef.current.getBoundingClientRect()
+    const time = Math.max(0, Math.min(clipDuration, (('clientX' in e ? e.clientX : 0) - r.left + scrollX) / hZoom))
+    videoRef.current.currentTime = selectedClip.start + time
+  }, [scrollX, hZoom, clipDuration, selectedClip])
+
+  const handleAudioMouseDown = useCallback((e: React.MouseEvent) => {
+    if (!audioContainerRef.current || !audioCanvasRef.current) return
+    const r = audioCanvasRef.current.getBoundingClientRect()
+    const time = Math.max(0, Math.min(clipDuration, (e.clientX - r.left + scrollX) / hZoom))
+
+    if (e.button === 1) {
+      // Middle click: seek playhead
+      e.preventDefault()
+      seekToAudioPosition(e)
+      return
+    }
+
+    if (e.button === 0 || e.button === 2) {
+      // If no overlays, auto-create one at the clicked position
+      if (overlays.length === 0) {
+        pushUndo('add')
+        const base = createDefaultOverlay(Math.max(0, time))
+        base.endTime = Math.min(clipDuration, time + 3)
+        setOverlays([base])
+        setSelectedId(base.id); setSelectedIds(new Set([base.id]))
+        return
+      }
+      if (!sel) {
+        // If overlays exist but none selected, create a new one
+        pushUndo('add')
+        const base = createDefaultOverlay(Math.max(0, time))
+        base.endTime = Math.min(clipDuration, time + 3)
+        // Copy styling from last overlay
+        if (overlays.length > 0) {
+          const prev = overlays[overlays.length - 1]
+          base.fontFamily = prev.fontFamily; base.fontSize = prev.fontSize; base.color = prev.color
+          base.backgroundColor = prev.backgroundColor; base.opacity = prev.opacity
+          base.fontWeight = prev.fontWeight; base.fontStyle = prev.fontStyle
+          base.bgEnabled = prev.bgEnabled; base.outlineEnabled = prev.outlineEnabled
+          base.outlineColor = prev.outlineColor; base.outlineWidth = prev.outlineWidth
+          base.x = prev.x; base.y = prev.y
+        }
+        setOverlays(prev => [...prev, base])
+        setSelectedId(base.id); setSelectedIds(new Set([base.id]))
+        return
+      }
+
+      // Normal behavior: set start/end time of selected overlay
+      pushUndo('set time')
+      if (e.button === 0) updateOverlay(sel.id, { startTime: Math.max(0, time) })
+      else if (e.button === 2) updateOverlay(sel.id, { endTime: Math.max(0, time) })
+    }
+  }, [audioContainerRef, scrollX, hZoom, clipDuration, overlays, sel, pushUndo, updateOverlay, createDefaultOverlay, seekToAudioPosition])
+
+  // Playhead drag: hold Alt+click to drag the playhead
+  const handlePlayheadDragStart = useCallback((e: React.MouseEvent) => {
+    if (!e.altKey || e.button !== 0) return
+    e.preventDefault()
+    setIsDraggingPlayhead(true)
+    seekToAudioPosition(e)
+    const onM = (ev: MouseEvent) => seekToAudioPosition(ev)
+    const onU = () => {
+      setIsDraggingPlayhead(false)
+      window.removeEventListener('mousemove', onM)
+      window.removeEventListener('mouseup', onU)
+    }
+    window.addEventListener('mousemove', onM)
+    window.addEventListener('mouseup', onU)
+  }, [seekToAudioPosition])
+
 
   const getRowClass = (o: TextOverlayData) => {
     const c = ['main-grid-row']
@@ -522,7 +929,55 @@ export function TranslationTimelineEditor() {
         <span className="main-menu-item" onClick={() => navigate('/')}>File</span>
         <span className="main-menu-item" onClick={undo}>Edit</span>
         <span className="main-menu-item">Subtitle</span>
-        <span className="main-menu-item">Timing</span>
+        <div className="main-menu-wrapper">
+          <span className="main-menu-item" onClick={() => setShowTimingMenu(!showTimingMenu)}>Timing</span>
+          {showTimingMenu && (
+            <div className="main-dropdown" onMouseLeave={() => setShowTimingMenu(false)}>
+              <div className="main-dropdown-item" onClick={() => { setShowShiftDialog(true); setShowTimingMenu(false) }}>
+                <span><Clock size={11} style={{ marginRight: 6, verticalAlign: 'middle' }} />Shift Times...</span>
+                <span className="main-dropdown-shortcut">Ctrl+Shift+T</span>
+              </div>
+              <div className="main-dropdown-sep" />
+              <div className="main-dropdown-item" onClick={() => { sortByTime(); setShowTimingMenu(false) }}>
+                Sort by Time
+              </div>
+              <div className="main-dropdown-sep" />
+              <div className="main-dropdown-item" onClick={() => { addLeadIn(200); setShowTimingMenu(false) }}>
+                Add Lead-In (200ms)
+              </div>
+              <div className="main-dropdown-item" onClick={() => { addLeadOut(200); setShowTimingMenu(false) }}>
+                Add Lead-Out (200ms)
+              </div>
+              <div className="main-dropdown-item" onClick={() => { addLeadIn(500); setShowTimingMenu(false) }}>
+                Add Lead-In (500ms)
+              </div>
+              <div className="main-dropdown-item" onClick={() => { addLeadOut(500); setShowTimingMenu(false) }}>
+                Add Lead-Out (500ms)
+              </div>
+              <div className="main-dropdown-sep" />
+              <div className="main-dropdown-item" onClick={() => { makeTimesContinuous(); setShowTimingMenu(false) }}>
+                Make Times Continuous
+              </div>
+              <div className="main-dropdown-sep" />
+              <div className={`main-dropdown-item ${!sel ? 'main-dropdown-item-disabled' : ''}`} onClick={() => { if (sel) { snapStartToKeyframe(); setShowTimingMenu(false) } }}>
+                <span>Snap Start to Frame</span>
+                <span className="main-dropdown-shortcut">Ctrl+Shift+3</span>
+              </div>
+              <div className={`main-dropdown-item ${!sel ? 'main-dropdown-item-disabled' : ''}`} onClick={() => { if (sel) { snapEndToKeyframe(); setShowTimingMenu(false) } }}>
+                <span>Snap End to Frame</span>
+                <span className="main-dropdown-shortcut">Ctrl+Shift+4</span>
+              </div>
+              <div className="main-dropdown-sep" />
+              <div className={`main-dropdown-item ${!sel || selIdx >= overlays.length - 1 ? 'main-dropdown-item-disabled' : ''}`} onClick={() => { joinWithNext(); setShowTimingMenu(false) }}>
+                Join with Next
+              </div>
+              <div className={`main-dropdown-item ${!sel || relTime <= sel.startTime || relTime >= sel.endTime ? 'main-dropdown-item-disabled' : ''}`} onClick={() => { splitAtCurrent(); setShowTimingMenu(false) }}>
+                <span>Split at Current Time</span>
+                <span className="main-dropdown-shortcut">Ctrl+Shift+S</span>
+              </div>
+            </div>
+          )}
+        </div>
         <span className="main-menu-item">Video</span>
         <span className="main-menu-item">Audio</span>
         <span className="main-menu-item" onClick={() => setShowOCR(!showOCR)}>OCR</span>
@@ -550,13 +1005,30 @@ export function TranslationTimelineEditor() {
         <button className={`main-tbtn ${showOCR ? 'main-tbtn-active' : ''}`} title="OCR Panel" onClick={() => setShowOCR(!showOCR)}><Scan size={12} /></button>
         <button className={`main-tbtn ${showTranslate ? 'main-tbtn-active' : ''}`} title="Translate" onClick={() => setShowTranslate(!showTranslate)}><Languages size={12} /></button>
         <div style={{ flex: 1 }} />
-        <button className="main-tbtn main-tbtn-primary" title="Export" onClick={() => navigate('/decision')} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <Download size={12} /> Export
-        </button>
+        <div className="main-menu-wrapper">
+          <button className="main-tbtn main-tbtn-primary" title="Export options" onClick={() => setShowExportMenu(!showExportMenu)} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Download size={12} /> Export
+          </button>
+          {showExportMenu && (
+            <div className="main-dropdown" style={{ right: 0, left: 'auto' }} onMouseLeave={() => setShowExportMenu(false)}>
+              <div className="main-dropdown-item" onClick={handleExportASS}>
+                <span>Download .ASS Subtitle</span>
+              </div>
+              <div className="main-dropdown-item" onClick={handleExportSRT}>
+                <span>Download .SRT Subtitle</span>
+              </div>
+              <div className="main-dropdown-sep" />
+              <div className="main-dropdown-item" onClick={handleExportVideoWithSubtitles}>
+                <span>Export MP4 with Subtitles</span>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
+
       <div className="main-top-panel" style={{ height: topH }}>
-        <div className="main-video-panel">
+        <div className="main-video-panel" style={{ flex: `0 0 ${videoPanelW}px` }}>
           <div className="main-video-container">
             {videoSrc ? (
               <div style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -593,6 +1065,17 @@ export function TranslationTimelineEditor() {
           </div>
         </div>
 
+        {/* Vertical resize handle between video and audio panels */}
+        <div
+          onMouseDown={handleVideoPanelResize}
+          style={{
+            width: 4, cursor: 'ew-resize', background: '#313244', flexShrink: 0,
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = '#89b4fa')}
+          onMouseLeave={e => (e.currentTarget.style.background = '#313244')}
+        />
+
         <div className="main-audio-panel">
           <div className="main-audio-toolbar">
             <button className={`main-tbtn ${audioMode === 'waveform' ? 'main-tbtn-active' : ''}`} onClick={() => setAudioMode('waveform')}>Wave</button>
@@ -611,12 +1094,21 @@ export function TranslationTimelineEditor() {
               </div>
             )}
             <canvas ref={audioCanvasRef} className="main-audio-canvas"
-              onClick={(e) => handleAudioClick(e, 0)}
-              onContextMenu={(e) => { e.preventDefault(); handleAudioClick(e, 2) }}
-              style={{ position: 'sticky', left: 0, top: 0, pointerEvents: 'auto', display: 'block' }}
+              onMouseDown={(e) => {
+                if (e.altKey) {
+                  handlePlayheadDragStart(e)
+                } else if (e.button === 1) {
+                  e.preventDefault()
+                  seekToAudioPosition(e)
+                } else {
+                  handleAudioMouseDown(e)
+                }
+              }}
+              onContextMenu={(e) => { e.preventDefault(); handleAudioMouseDown(e) }}
+              style={{ position: 'sticky', left: 0, top: 0, pointerEvents: 'auto', display: 'block', cursor: isDraggingPlayhead ? 'grabbing' : 'crosshair' }}
             />
             {audioBuffer && (
-              <div style={{ width: audioBuffer.duration * hZoom, height: 1, pointerEvents: 'none' }} />
+              <div style={{ width: clipDuration * hZoom, height: 1, pointerEvents: 'none' }} />
             )}
             {audioBuffer && (
               <div
@@ -718,13 +1210,38 @@ export function TranslationTimelineEditor() {
               <span className="main-label">Y:</span>
               <input type="number" value={Math.round(sel.y)} onChange={e => updateOverlay(sel.id, { y: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
             </label>
+            <div className="main-editbox-separator" />
             <label className="main-editbox-control">
               <span className="main-label">Color:</span>
               <input type="color" value={sel.color} onChange={e => updateOverlay(sel.id, { color: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0 }} />
             </label>
             <label className="main-editbox-control">
+              <input type="checkbox" checked={sel.bgEnabled ?? true} onChange={e => updateOverlay(sel.id, { bgEnabled: e.target.checked })} className="main-checkbox" />
               <span className="main-label">BG:</span>
-              <input type="color" value={sel.backgroundColor || '#000000'} onChange={e => updateOverlay(sel.id, { backgroundColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0 }} />
+              <input type="color" disabled={!(sel.bgEnabled ?? true)} value={sel.backgroundColor || '#000000'} onChange={e => updateOverlay(sel.id, { backgroundColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: !sel.bgEnabled ? 'default' : 'pointer', padding: 0, opacity: !sel.bgEnabled ? 0.3 : 1 }} />
+            </label>
+          </div>
+          <div className="main-editbox-row">
+            <label className="main-editbox-control">
+              <input type="checkbox" checked={sel.outlineEnabled ?? false} onChange={e => updateOverlay(sel.id, { outlineEnabled: e.target.checked })} className="main-checkbox" />
+              <span className="main-label">Outline 1:</span>
+              <input type="color" disabled={!sel.outlineEnabled} value={sel.outlineColor || '#000000'} onChange={e => updateOverlay(sel.id, { outlineColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.outlineEnabled ? 0.3 : 1 }} />
+              <input type="number" disabled={!sel.outlineEnabled} value={sel.outlineWidth ?? 2} onChange={e => updateOverlay(sel.id, { outlineWidth: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 32, opacity: !sel.outlineEnabled ? 0.3 : 1 }} />
+            </label>
+            <div className="main-editbox-separator" />
+            <label className="main-editbox-control">
+              <input type="checkbox" checked={sel.secondaryOutlineEnabled ?? false} onChange={e => updateOverlay(sel.id, { secondaryOutlineEnabled: e.target.checked })} className="main-checkbox" />
+              <span className="main-label">Outline 2:</span>
+              <input type="color" disabled={!sel.secondaryOutlineEnabled} value={sel.secondaryOutlineColor || '#FF0000'} onChange={e => updateOverlay(sel.id, { secondaryOutlineColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.secondaryOutlineEnabled ? 0.3 : 1 }} />
+              <input type="number" disabled={!sel.secondaryOutlineEnabled} value={sel.secondaryOutlineWidth ?? 2} onChange={e => updateOverlay(sel.id, { secondaryOutlineWidth: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 32, opacity: !sel.secondaryOutlineEnabled ? 0.3 : 1 }} />
+            </label>
+            <div className="main-editbox-separator" />
+            <label className="main-editbox-control">
+              <input type="checkbox" checked={sel.gradientEnabled ?? false} onChange={e => updateOverlay(sel.id, { gradientEnabled: e.target.checked })} className="main-checkbox" />
+              <span className="main-label">Gradient:</span>
+              <input type="color" disabled={!sel.gradientEnabled} value={sel.gradientColors?.[0] || '#FFFFFF'} onChange={e => updateOverlay(sel.id, { gradientColors: [e.target.value, sel.gradientColors?.[1] || '#000000'] })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
+              <input type="color" disabled={!sel.gradientEnabled} value={sel.gradientColors?.[1] || '#000000'} onChange={e => updateOverlay(sel.id, { gradientColors: [sel.gradientColors?.[0] || '#FFFFFF', e.target.value] })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
+              <input type="number" disabled={!sel.gradientEnabled} value={sel.gradientAngle ?? 180} onChange={e => updateOverlay(sel.id, { gradientAngle: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 40, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
             </label>
           </div>
           <div className="main-editbox-row">
@@ -842,6 +1359,84 @@ export function TranslationTimelineEditor() {
             sourceText={ocrText} sourceLanguage={srcLang} targetLanguage={tgtLang}
             onSourceLanguageChange={setSrcLang} onTargetLanguageChange={setTgtLang}
           />
+        </div>
+      )}
+
+      {/* ── Shift Times Dialog (Aegisub-style) ── */}
+      {showShiftDialog && (
+        <div className="main-modal-overlay" onClick={() => setShowShiftDialog(false)}>
+          <div className="main-modal" onClick={e => e.stopPropagation()}>
+            <div className="main-modal-header">
+              <h3>Shift Times</h3>
+              <button className="main-tbtn" onClick={() => setShowShiftDialog(false)}><X size={12} /></button>
+            </div>
+            <div className="main-modal-body">
+              <div className="main-modal-row">
+                <span className="main-modal-label">Time:</span>
+                <input
+                  type="text"
+                  value={shiftAmount}
+                  onChange={e => setShiftAmount(e.target.value)}
+                  className="main-input main-input-time"
+                  placeholder="0:00:00.00"
+                />
+              </div>
+
+              <div className="main-modal-group">
+                <div className="main-modal-group-title">Direction</div>
+                <div className="main-radio-group">
+                  <label className="main-radio-label">
+                    <input type="radio" name="shift-dir" checked={shiftDir === 'forward'} onChange={() => setShiftDir('forward')} />
+                    Forward (later)
+                  </label>
+                  <label className="main-radio-label">
+                    <input type="radio" name="shift-dir" checked={shiftDir === 'backward'} onChange={() => setShiftDir('backward')} />
+                    Backward (earlier)
+                  </label>
+                </div>
+              </div>
+
+              <div className="main-modal-group">
+                <div className="main-modal-group-title">Affect</div>
+                <div className="main-radio-group">
+                  <label className="main-radio-label">
+                    <input type="radio" name="shift-scope" checked={shiftScope === 'all'} onChange={() => setShiftScope('all')} />
+                    All rows
+                  </label>
+                  <label className="main-radio-label">
+                    <input type="radio" name="shift-scope" checked={shiftScope === 'selected'} onChange={() => setShiftScope('selected')} />
+                    Selected rows ({selectedIds.size})
+                  </label>
+                  <label className="main-radio-label">
+                    <input type="radio" name="shift-scope" checked={shiftScope === 'onward'} onChange={() => setShiftScope('onward')} />
+                    Selection onward
+                  </label>
+                </div>
+              </div>
+
+              <div className="main-modal-group">
+                <div className="main-modal-group-title">Times</div>
+                <div className="main-radio-group">
+                  <label className="main-radio-label">
+                    <input type="radio" name="shift-fields" checked={shiftFields === 'both'} onChange={() => setShiftFields('both')} />
+                    Start and End times
+                  </label>
+                  <label className="main-radio-label">
+                    <input type="radio" name="shift-fields" checked={shiftFields === 'start'} onChange={() => setShiftFields('start')} />
+                    Start times only
+                  </label>
+                  <label className="main-radio-label">
+                    <input type="radio" name="shift-fields" checked={shiftFields === 'end'} onChange={() => setShiftFields('end')} />
+                    End times only
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div className="main-modal-footer">
+              <button className="main-tbtn" onClick={() => setShowShiftDialog(false)}>Cancel</button>
+              <button className="main-tbtn main-tbtn-primary" onClick={applyShiftTimes}>Apply</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

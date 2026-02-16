@@ -75,3 +75,11 @@ type Clip struct {
 type ExportRequest struct {
 	Clips []Clip `json:"clips"`
 }
+
+type SubtitleExportRequest struct {
+	VideoID    string  `json:"videoId"`
+	Start      float64 `json:"start"`
+	End        float64 `json:"end"`
+	AssContent string  `json:"assContent"`
+	Label      string  `json:"label"`
+}

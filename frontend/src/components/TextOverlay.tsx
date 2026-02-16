@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useRef } from 'react'
 import { X } from 'lucide-react'
-import { motion, type Variants } from 'framer-motion'
+import { motion } from 'framer-motion'
 
 /* ── Animation types & config ────────────────────────────── */
 
@@ -67,23 +67,87 @@ const BUILTIN_FONTS = [
   'Trebuchet MS', 'Lucida Console', 'Tahoma', 'Segoe UI',
 ]
 
+/**
+ * Reads the font's internal family name (nameID=1) from a TTF/OTF file buffer.
+ * This is necessary because FFmpeg's libass matches fonts by internal family name,
+ * not by filename. Falls back to filename if parsing fails.
+ */
+function readFontFamilyName(buffer: ArrayBuffer, fallback: string): string {
+  try {
+    const view = new DataView(buffer)
+    const numTables = view.getUint16(4)
+    let nameTableOffset = 0
+    // Find 'name' table in the font directory
+    for (let i = 0; i < numTables; i++) {
+      const offset = 12 + i * 16
+      const tag = String.fromCharCode(
+        view.getUint8(offset), view.getUint8(offset + 1),
+        view.getUint8(offset + 2), view.getUint8(offset + 3)
+      )
+      if (tag === 'name') {
+        nameTableOffset = view.getUint32(offset + 8)
+        break
+      }
+    }
+    if (!nameTableOffset) return fallback
+
+    const count = view.getUint16(nameTableOffset + 2)
+    const stringOffset = nameTableOffset + view.getUint16(nameTableOffset + 4)
+
+    // Look for nameID=1 (Font Family), prefer platformID=3 (Windows) first, then platformID=1 (Mac)
+    for (const targetPlatform of [3, 1]) {
+      for (let i = 0; i < count; i++) {
+        const recOffset = nameTableOffset + 6 + i * 12
+        const platformID = view.getUint16(recOffset)
+        const nameID = view.getUint16(recOffset + 6)
+        const length = view.getUint16(recOffset + 8)
+        const strOff = view.getUint16(recOffset + 10)
+
+        if (nameID === 1 && platformID === targetPlatform) {
+          const bytes = new Uint8Array(buffer, stringOffset + strOff, length)
+          if (platformID === 3) {
+            // UTF-16BE decoding
+            let result = ''
+            for (let j = 0; j < bytes.length; j += 2) {
+              result += String.fromCharCode((bytes[j] << 8) | bytes[j + 1])
+            }
+            if (result) return result
+          } else {
+            // ASCII/Latin
+            const result = new TextDecoder('ascii').decode(bytes)
+            if (result) return result
+          }
+        }
+      }
+    }
+    return fallback
+  } catch {
+    return fallback
+  }
+}
+
 /** Loads a custom font from a File object, returns a CustomFont record */
 export async function loadFontFromFile(file: File): Promise<CustomFont> {
   const url = URL.createObjectURL(file)
-  const name = file.name.replace(/\.(woff2?|ttf|otf|eot)$/i, '')
+  const fallbackName = file.name.replace(/\.(woff2?|ttf|otf|eot)$/i, '')
   const ext = file.name.split('.').pop()?.toLowerCase() || 'truetype'
   const formatMap: Record<string, string> = {
     woff2: 'woff2', woff: 'woff', ttf: 'truetype', otf: 'opentype', eot: 'embedded-opentype',
   }
   const format = formatMap[ext] || 'truetype'
 
-  // Register with browser
+  // Read font family name from the binary file
+  const arrayBuffer = await file.arrayBuffer()
+  const name = readFontFamilyName(arrayBuffer, fallbackName)
+
+  // Register with browser using the internal font family name
   const fontFace = new FontFace(name, `url(${url})`, { style: 'normal', weight: '400' })
   await fontFace.load()
   document.fonts.add(fontFace)
 
   return { name, url, format }
 }
+
 
 /** Returns combined list of builtin + custom font names */
 export function getAllFonts(customFonts: CustomFont[]): string[] {
@@ -117,6 +181,17 @@ export interface TextOverlayData {
   textShadowCustom?: string
   borderRadius?: number
   padding?: number
+  // Advanced styling
+  bgEnabled?: boolean
+  outlineEnabled?: boolean
+  outlineColor?: string
+  outlineWidth?: number
+  secondaryOutlineEnabled?: boolean
+  secondaryOutlineColor?: string
+  secondaryOutlineWidth?: number
+  gradientEnabled?: boolean
+  gradientColors?: string[]
+  gradientAngle?: number
 }
 
 /* ── default overlay factory ────────────────────────────── */
@@ -143,6 +218,16 @@ export function createDefaultOverlay(startTime: number): TextOverlayData {
     lineHeight: 1.2,
     padding: 8,
     borderRadius: 4,
+    bgEnabled: true,
+    outlineEnabled: false,
+    outlineColor: '#000000',
+    outlineWidth: 2,
+    secondaryOutlineEnabled: false,
+    secondaryOutlineColor: '#FF0000',
+    secondaryOutlineWidth: 2,
+    gradientEnabled: false,
+    gradientColors: ['#FFFFFF', '#000000'],
+    gradientAngle: 180,
   }
 }
 
@@ -253,6 +338,83 @@ export function TextOverlay({ overlay, currentTime, isSelected, onSelect, onUpda
     ? overlay.text.slice(0, typewriterChars) + (typewriterChars < overlay.text.length ? '▌' : '')
     : overlay.text
 
+  /* ── compute advanced styles ───────────────────────── */
+  const commonStyles: React.CSSProperties = {
+    fontFamily: overlay.fontFamily,
+    fontSize: `${overlay.fontSize}px`,
+    fontWeight: overlay.fontWeight || 400,
+    fontStyle: overlay.fontStyle || 'normal',
+    letterSpacing: overlay.letterSpacing ? `${overlay.letterSpacing}px` : undefined,
+    lineHeight: overlay.lineHeight || 1.2,
+    textDecoration: overlay.textDecoration || 'none',
+    padding: overlay.bgEnabled ? `${overlay.padding ?? 8}px` : '0',
+    borderRadius: `${overlay.borderRadius ?? 4}px`,
+  }
+
+  const textStyles: React.CSSProperties = {
+    ...commonStyles,
+    position: 'relative',
+    zIndex: 3,
+    color: overlay.color,
+    opacity: overlay.opacity,
+  }
+
+  // Background
+  if (overlay.bgEnabled) {
+    textStyles.backgroundColor = overlay.backgroundColor || '#000000'
+  } else {
+    textStyles.backgroundColor = 'transparent'
+  }
+
+  // Gradient
+  if (overlay.gradientEnabled && overlay.gradientColors && overlay.gradientColors.length > 1) {
+    const angle = overlay.gradientAngle ?? 180
+    const colors = overlay.gradientColors.join(', ')
+    textStyles.backgroundImage = `linear-gradient(${angle}deg, ${colors})`
+    textStyles.WebkitBackgroundClip = 'text'
+    textStyles.WebkitTextFillColor = 'transparent'
+    textStyles.color = 'transparent'
+  }
+
+  // Outlines using layered -webkit-text-stroke for perfect smoothness
+  const outlineStyles: React.CSSProperties[] = []
+
+  if (overlay.secondaryOutlineEnabled) {
+    const w = (overlay.outlineWidth || 2) + (overlay.secondaryOutlineWidth || 2)
+    outlineStyles.push({
+      ...commonStyles,
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      zIndex: 1,
+      WebkitTextStroke: `${w * 2}px ${overlay.secondaryOutlineColor || '#FF0000'}`,
+      color: 'transparent',
+      backgroundColor: 'transparent',
+    })
+  }
+
+  if (overlay.outlineEnabled) {
+    const w = overlay.outlineWidth || 2
+    outlineStyles.push({
+      ...commonStyles,
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      zIndex: 2,
+      WebkitTextStroke: `${w * 2}px ${overlay.outlineColor || '#000000'}`,
+      color: 'transparent',
+      backgroundColor: 'transparent',
+    })
+  }
+
+  if (!overlay.outlineEnabled && !overlay.bgEnabled && !overlay.gradientEnabled) {
+    textStyles.textShadow = '2px 2px 4px rgba(0,0,0,0.8)'
+  }
+
+  if (overlay.textShadowCustom) {
+    textStyles.textShadow = (textStyles.textShadow ? textStyles.textShadow + ', ' : '') + overlay.textShadowCustom
+  }
+
   /* ── drag handlers ─────────────────────────────────── */
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.target === e.currentTarget || (e.target as HTMLElement).closest('.text-content')) {
@@ -289,33 +451,28 @@ export function TextOverlay({ overlay, currentTime, isSelected, onSelect, onUpda
       animate={animStyle}
       transition={getTransition()}
     >
-      <div
-        ref={textRef}
-        className="text-content relative whitespace-pre-wrap"
-        style={{
-          fontFamily: overlay.fontFamily,
-          fontSize: `${overlay.fontSize}px`,
-          fontWeight: overlay.fontWeight || 400,
-          fontStyle: overlay.fontStyle || 'normal',
-          letterSpacing: overlay.letterSpacing ? `${overlay.letterSpacing}px` : undefined,
-          lineHeight: overlay.lineHeight || 1.2,
-          color: overlay.color,
-          backgroundColor: overlay.backgroundColor || 'transparent',
-          padding: overlay.backgroundColor ? `${overlay.padding ?? 8}px` : '0',
-          borderRadius: `${overlay.borderRadius ?? 4}px`,
-          opacity: overlay.opacity,
-          textShadow: overlay.textShadowCustom || (overlay.backgroundColor ? 'none' : '2px 2px 4px rgba(0,0,0,0.8)'),
-          textDecoration: overlay.textDecoration || 'none',
-          WebkitTextStroke: overlay.textStroke || 'none',
-        }}
-      >
-        {displayText}
-        {isSelected && (
-          <button onClick={(e) => { e.stopPropagation(); onDelete() }}
-            className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 hover:bg-red-600 z-10">
-            <X size={14} />
-          </button>
-        )}
+      <div className="relative">
+        {/* Outline Layers */}
+        {outlineStyles.map((style, i) => (
+          <div key={i} className="whitespace-pre-wrap pointer-events-none select-none" style={style}>
+            {displayText}
+          </div>
+        ))}
+
+        {/* Main Text Content */}
+        <div
+          ref={textRef}
+          className="text-content whitespace-pre-wrap"
+          style={textStyles}
+        >
+          {displayText}
+          {isSelected && (
+            <button onClick={(e) => { e.stopPropagation(); onDelete() }}
+              className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 hover:bg-red-600 z-10 pointer-events-auto">
+              <X size={14} />
+            </button>
+          )}
+        </div>
       </div>
     </motion.div>
   )

@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Plus, Settings, Download, ChevronDown } from 'lucide-react'
+import { Plus, Settings, Download, ChevronDown, FolderOpen, Home } from 'lucide-react'
 import { useSessionStore } from '../store/sessionStore'
 import { useVideoMetadata } from '../hooks/useVideoMetadata'
 import { useJobProgress } from '../hooks/useJobProgress'
-import { getVideoFileUrl, createClip, submitVideoUrl, getAvailableQualities } from '../api/client'
+import { getVideoFileUrl, createClip, submitVideoUrl, getAvailableQualities, openVideoFolder } from '../api/client'
 import { VideoPlayer } from '../components/VideoPlayer'
 import { TrimBar } from '../components/TrimBar'
 import { ClipTray } from '../components/ClipTray'
@@ -75,13 +75,14 @@ export function ClipEditor() {
   const [isLoadingQualities, setIsLoadingQualities] = useState(false)
   const [processingClips, setProcessingClips] = useState<Set<string>>(new Set())
   const [isVideoReady, setIsVideoReady] = useState(false)
-  const [showClipsPanel, setShowClipsPanel] = useState(true)
+  const [showClipsPanel] = useState(true)
   const [viewingClip, setViewingClip] = useState<{ start: number; end: number; videoId?: string } | null>(null)
   const [isClipPreviewOpen, setIsClipPreviewOpen] = useState(true)
   const hasRestoredClipRef = useRef(false)
 
   const [startInput, setStartInput] = useState('')
   const [endInput, setEndInput] = useState('')
+  const [isFileMenuOpen, setIsFileMenuOpen] = useState(false)
 
   useEffect(() => {
     setStartInput(formatTime(startTime))
@@ -349,6 +350,17 @@ export function ClipEditor() {
     }
   }
 
+  const handleOpenFileLocation = async () => {
+    if (!activeVideo) return
+    try {
+      await openVideoFolder(activeVideo.id)
+    } catch (err: any) {
+      console.error('Failed to open file location:', err)
+      alert('Failed to open file location')
+    }
+    setIsFileMenuOpen(false)
+  }
+
   if (!activeVideo) {
     return (
       <div className="main-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -362,11 +374,71 @@ export function ClipEditor() {
   return (
     <div className="main-container">
       <div className="main-menubar">
-        <span className="main-menu-item" onClick={() => navigate('/')}>File</span>
-        <span className="main-menu-item" onClick={() => navigate('/translate')}>Edit</span>
-        <span className="main-menu-item">Video</span>
-        <span className="main-menu-item">Clips</span>
-        <span className="main-menu-item">Help</span>
+        <div style={{ position: 'relative' }}>
+          <span
+            className={`main-menu-item ${isFileMenuOpen ? 'active' : ''}`}
+            onClick={() => setIsFileMenuOpen(!isFileMenuOpen)}
+          >
+            File
+          </span>
+          {isFileMenuOpen && (
+            <div style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              background: '#1e1e2e',
+              border: '1px solid #313244',
+              borderRadius: '4px',
+              padding: '4px',
+              zIndex: 1000,
+              minWidth: '180px',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)'
+            }}>
+              <button
+                style={{
+                  textAlign: 'left',
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#cdd6f4',
+                  padding: '8px 12px',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  width: '100%'
+                }}
+                className="hover:bg-[#313244]" // Assuming you have tailwind or similar, otherwise I should use onMouseEnter/Leave or a css class.
+                onClick={() => {
+                  navigate('/')
+                  setIsFileMenuOpen(false)
+                }}
+              >
+                <Home size={14} /> Home
+              </button>
+              <button
+                style={{
+                  textAlign: 'left',
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#cdd6f4',
+                  padding: '8px 12px',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  width: '100%'
+                }}
+                onClick={handleOpenFileLocation}
+              >
+                <FolderOpen size={14} /> Open file location
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="main-main-toolbar">
@@ -392,13 +464,6 @@ export function ClipEditor() {
             <ChevronDown size={12} style={{ position: 'absolute', right: 8, color: '#6c7086', pointerEvents: 'none' }} />
           </div>
         </div>
-        <div className="main-editbox-separator" />
-        <button
-          className={`main-tbtn ${showClipsPanel ? 'main-tbtn-active' : ''}`}
-          onClick={() => setShowClipsPanel(!showClipsPanel)}
-        >
-          <Settings size={14} /> Clips Panel
-        </button>
         <div style={{ flex: 1 }} />
         {clips.length > 0 && (
           <button className="main-tbtn main-tbtn-primary" onClick={() => navigate('/decision')}>

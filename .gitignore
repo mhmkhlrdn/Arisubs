@@ -41,6 +41,7 @@ pid
 *.pid
 *.seed
 *.pid.lock
+config
 
 # Frontend specific
 .eslintcache

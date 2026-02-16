@@ -5,10 +5,15 @@ import (
 	"arisubs/backend/models"
 	"arisubs/backend/services"
 	"arisubs/backend/storage"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 
 	"github.com/gin-gonic/gin"
@@ -19,14 +24,16 @@ type VideoHandler struct {
 	downloadQueue *jobs.DownloadQueue
 	store         *storage.Store
 	ytdlp         *services.YtDlpService
+	ffmpeg        *services.FFmpegService
 }
 
-func NewVideoHandler(queue *jobs.JobQueue, store *storage.Store, ytdlp *services.YtDlpService) *VideoHandler {
+func NewVideoHandler(queue *jobs.JobQueue, store *storage.Store, ytdlp *services.YtDlpService, ffmpeg *services.FFmpegService) *VideoHandler {
 	return &VideoHandler{
 		queue:         queue,
 		downloadQueue: jobs.NewDownloadQueue(),
 		store:         store,
 		ytdlp:         ytdlp,
+		ffmpeg:        ffmpeg,
 	}
 }
 
@@ -38,7 +45,7 @@ type VideoRequest struct {
 type VideoResponse struct {
 	JobID   string        `json:"jobId"`
 	VideoID string        `json:"videoId"`
-	Video   *models.Video `json:"video,omitempty"` // Metadata available immediately
+	Video   *models.Video `json:"video,omitempty"`
 }
 
 /*
@@ -264,4 +271,92 @@ func (h *VideoHandler) GetAvailableQualities(c *gin.Context) {
 
 	log.Printf("[DEBUG] GetAvailableQualities: Returning %d qualities: %v", len(qualities), qualities)
 	c.JSON(http.StatusOK, gin.H{"qualities": qualities})
+}
+
+func (h *VideoHandler) OpenVideoFolder(c *gin.Context) {
+	videoID := c.Param("id")
+	if !h.store.VideoExists(videoID) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Video not found"})
+		return
+	}
+
+	videoPath := h.store.VideoPath(videoID)
+	absPath, err := filepath.Abs(videoPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve path"})
+		return
+	}
+	absPath = filepath.FromSlash(absPath)
+	log.Printf("[DEBUG] OpenVideoFolder: Opening file location: %s", absPath)
+
+	cmd := exec.Command("explorer.exe", "/select,"+absPath)
+	cmd.Run()
+	c.JSON(http.StatusOK, gin.H{"message": "Folder opened"})
+}
+
+func (h *VideoHandler) UploadVideo(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No file uploaded"})
+		return
+	}
+	defer file.Close()
+
+	// Generate a unique ID (random 11 chars similar to YouTube)
+	videoID := generateRandomID(11)
+
+	// Save file
+	videosDir := h.store.VideosDir()
+	filePath := filepath.Join(videosDir, videoID+".mp4")
+	out, err := os.Create(filePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create file"})
+		return
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, file); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file"})
+		return
+	}
+
+	duration, err := h.ffmpeg.ProbeVideoDuration(filePath)
+	if err != nil {
+		log.Printf("Failed to probe video duration: %v", err)
+		duration = 0
+	}
+
+	videoMeta := &models.Video{
+		ID:       videoID,
+		Title:    header.Filename,
+		Duration: duration,
+		FilePath: filePath,
+	}
+
+	if err := h.store.SaveVideoMeta(videoID, videoMeta); err != nil {
+		log.Printf("Failed to save metadata: %v", err)
+	}
+
+	c.JSON(http.StatusOK, VideoResponse{
+		JobID:   "",
+		VideoID: videoID,
+		Video:   videoMeta,
+	})
+}
+
+func generateRandomID(length int) string {
+	bytes := make([]byte, length/2+1)
+	if _, err := rand.Read(bytes); err != nil {
+		return "upload_" + fmt.Sprintf("%d", os.Getpid())
+	}
+	return hex.EncodeToString(bytes)[:length]
+}
+
+func (h *VideoHandler) ListVideos(c *gin.Context) {
+	videos, err := h.store.ListVideos()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list videos"})
+		return
+	}
+	c.JSON(http.StatusOK, videos)
 }

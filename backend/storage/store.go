@@ -113,3 +113,23 @@ func (s *Store) LoadVideoMeta(videoID string) (*models.Video, error) {
 	}
 	return &video, nil
 }
+
+func (s *Store) ListVideos() ([]*models.Video, error) {
+	metaDir := s.cfg.MetaDir()
+	files, err := os.ReadDir(metaDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var videos []*models.Video
+	for _, file := range files {
+		if filepath.Ext(file.Name()) == ".json" {
+			videoID := file.Name()[:len(file.Name())-5]
+			video, err := s.LoadVideoMeta(videoID)
+			if err == nil {
+				videos = append(videos, video)
+			}
+		}
+	}
+	return videos, nil
+}
