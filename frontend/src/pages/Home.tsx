@@ -3,8 +3,8 @@ import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { submitVideoUrl, getAvailableQualities, uploadVideo, listVideos } from '../api/client'
 import { useSessionStore } from '../store/sessionStore'
-import { Upload, Youtube, Play } from 'lucide-react'
-import type { Video } from '../types'
+import { Upload, Youtube, Play, Download, Scissors } from 'lucide-react'
+import type { Video, QualityInfo } from '../types'
 import '../styles/main.css'
 
 /**
@@ -26,15 +26,23 @@ import '../styles/main.css'
 export function Home() {
   const [url, setUrl] = useState('')
   const [quality, setQuality] = useState('best')
-  const [availableQualities, setAvailableQualities] = useState<string[]>(['best', '1080p', '720p', '480p', '360p', 'worst'])
+  const [availableQualities, setAvailableQualities] = useState<QualityInfo[]>([
+    { label: 'best', size: '', sizeInBytes: 0 },
+    { label: '1080p', size: '', sizeInBytes: 0 },
+    { label: '720p', size: '', sizeInBytes: 0 },
+    { label: '480p', size: '', sizeInBytes: 0 },
+    { label: '360p', size: '', sizeInBytes: 0 },
+    { label: 'worst', size: '', sizeInBytes: 0 }
+  ])
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [isLoadingQualities, setIsLoadingQualities] = useState(false)
   const [activeTab, setActiveTab] = useState<'youtube' | 'local'>('youtube')
   const [isRecentMenuOpen, setIsRecentMenuOpen] = useState(false)
   const [recentVideos, setRecentVideos] = useState<Video[]>([])
+  const [importMode, setImportMode] = useState<'download' | 'clip'>('clip')
   const navigate = useNavigate()
-  const { setActiveVideo } = useSessionStore()
+  const { setActiveVideo, setVideoJobId } = useSessionStore()
 
   const validateYouTubeUrl = (url: string): boolean => {
     const patterns = [
@@ -52,7 +60,8 @@ export function Home() {
       getAvailableQualities(url)
         .then((qualities) => {
           setAvailableQualities(qualities)
-          if (!qualities.includes(quality)) {
+          const labels = qualities.map(q => q.label)
+          if (!labels.includes(quality)) {
             setQuality('best')
           }
         })
@@ -82,22 +91,22 @@ export function Home() {
     setIsLoading(true)
 
     try {
-      const { jobId, videoId, video } = await submitVideoUrl(url, quality)
+      const { jobId, videoId, video } = await submitVideoUrl(url, quality, importMode === 'clip')
 
       if (video) {
         setActiveVideo(video)
       }
 
       if (jobId) {
-        const { setVideoJobId } = useSessionStore.getState()
         setVideoJobId(videoId, jobId)
       }
 
-      if (jobId) {
-        navigate(`/editor/${videoId}`)
-      } else {
-        navigate(`/editor/${videoId}`)
-      }
+      // Store URL, quality, and mode in sessionStorage so ClipEditor can use them
+      sessionStorage.setItem('videoUrl', url)
+      sessionStorage.setItem('videoQuality', quality)
+      sessionStorage.setItem('importMode', importMode)
+
+      navigate(`/editor/${videoId}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to submit video')
     } finally {
@@ -254,10 +263,30 @@ export function Home() {
                   placeholder="Paste YouTube URL (e.g., https://youtu.be/...)"
                   className="main-input main-input-lg"
                   disabled={isLoading}
-                  style={{ marginBottom: 12 }}
+                  style={{ marginBottom: 16 }}
                 />
 
-                <div className="main-editbox-row" style={{ marginBottom: 12 }}>
+                <div className="main-section-title">Import Method</div>
+                <div className="main-mode-selector">
+                  <div
+                    className={`main-mode-card ${importMode === 'download' ? 'active' : ''}`}
+                    onClick={() => setImportMode('download')}
+                  >
+                    <Download size={20} color={importMode === 'download' ? '#89b4fa' : '#6c7086'} />
+                    <div className="main-mode-card-title">Download Full</div>
+                    <div className="main-mode-card-desc">Download entire video first. Best for long sessions.</div>
+                  </div>
+                  <div
+                    className={`main-mode-card ${importMode === 'clip' ? 'active' : ''}`}
+                    onClick={() => setImportMode('clip')}
+                  >
+                    <Scissors size={20} color={importMode === 'clip' ? '#89b4fa' : '#6c7086'} />
+                    <div className="main-mode-card-title">Partial Clip</div>
+                    <div className="main-mode-card-desc">Preview first, download only selected range. Fast & efficient.</div>
+                  </div>
+                </div>
+
+                <div className="main-editbox-row" style={{ marginBottom: 16 }}>
                   <span className="main-label" style={{ fontSize: 13 }}>Quality:</span>
                   <select
                     value={quality}
@@ -270,8 +299,9 @@ export function Home() {
                       <option value="best">Detecting streams...</option>
                     ) : (
                       availableQualities.map((q) => (
-                        <option key={q} value={q}>
-                          {q === 'best' ? 'Best Quality' : q === 'worst' ? 'Efficiency Mode' : q}
+                        <option key={q.label} value={q.label}>
+                          {q.label === 'best' ? 'Best Quality' : q.label === 'worst' ? 'Efficiency Mode' : q.label}
+                          {q.size ? ` (${q.size})` : ''}
                         </option>
                       ))
                     )}

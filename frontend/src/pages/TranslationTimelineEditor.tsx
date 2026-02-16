@@ -6,7 +6,10 @@ import {
   ZoomIn, ZoomOut, Upload, Clock
 } from 'lucide-react'
 import { useSessionStore } from '../store/sessionStore'
-import { getVideoFileUrl, submitExportWithSubtitles } from '../api/client'
+import { useJobProgress } from '../hooks/useJobProgress'
+import { ProgressBar } from '../components/ProgressBar'
+import { Modal } from '../components/Modal'
+import { getVideoFileUrl, submitExportWithSubtitles, getDownloadUrl } from '../api/client'
 import {
   TextOverlay,
   type TextOverlayData,
@@ -83,12 +86,9 @@ function rgbToABGR(hex: string, opacity: number = 1): string {
   return `&H${a}${b.toUpperCase()}${g.toUpperCase()}${r.toUpperCase()}`
 }
 
-function exportOverlaysAsASS(overlays: TextOverlayData[], clipLabel: string, containerW: number, containerH: number): string {
+function exportOverlaysAsASS(overlays: TextOverlayData[], clipLabel: string): string {
   const targetW = 1920
   const targetH = 1080
-  const scaleX = targetW / (containerW || 1)
-  const scaleY = targetH / (containerH || 1)
-  const scaleFont = targetH / (containerH || 1)
 
   const lines: string[] = []
   lines.push('[Script Info]')
@@ -107,12 +107,10 @@ function exportOverlaysAsASS(overlays: TextOverlayData[], clipLabel: string, con
     const primary = rgbToABGR(o.color || '#FFFFFF', opacity)
     const secondary = '&H000000FF'
     const outline = rgbToABGR(o.outlineEnabled ? (o.outlineColor || '#000000') : '#000000', opacity)
-    // BackColour: use background color when bgEnabled, otherwise use outline color for shadow
     const back = o.bgEnabled
       ? rgbToABGR(o.backgroundColor || '#000000', opacity)
       : rgbToABGR('#000000', o.outlineEnabled ? opacity : 0.8)
 
-    // Match editor's bold/italic/underline/strikeout
     const fw = o.fontWeight ?? 400
     const boldValue = fw >= 700 ? -1 : 0
     const isItalic = o.fontStyle === 'italic' ? -1 : 0
@@ -120,24 +118,16 @@ function exportOverlaysAsASS(overlays: TextOverlayData[], clipLabel: string, con
     const isStrikeOut = o.textDecoration?.includes('line-through') ? -1 : 0
 
     const borderStyle = o.bgEnabled ? 3 : 1
-    // ASS Outline is the border width in pixels (not doubled like CSS -webkit-text-stroke)
-    // In the editor, -webkit-text-stroke is w*2 because stroke extends both inside and outside,
-    // but ASS Outline extends only outward, so use the raw width value
-    const outlineW = Math.round((o.outlineEnabled ? (o.outlineWidth ?? 2) : 0) * scaleFont)
-
-    // Match editor's default shadow logic
+    const outlineW = Math.round((o.outlineEnabled ? (o.outlineWidth ?? 2) : 0))
     let shadowW = 0
-    if (!o.outlineEnabled && !o.bgEnabled && !o.gradientEnabled) {
-      shadowW = Math.round(2 * scaleFont)
-    }
-    if (o.textShadowCustom) {
-      shadowW = Math.round(2 * scaleFont)
-    }
+    if (!o.outlineEnabled && !o.bgEnabled && !o.gradientEnabled) shadowW = 2
+    if (o.textShadowCustom) shadowW = 2
 
-    const fontSize = Math.round((o.fontSize || 32) * scaleFont)
-    const spacing = Math.round((o.letterSpacing ?? 0) * scaleFont)
+    const fontSize = o.fontSize || 32
+    const spacing = o.letterSpacing ?? 0
 
-    lines.push(`Style: ${styleName},${o.fontFamily || 'Arial'},${fontSize},${primary},${secondary},${outline},${back},${boldValue},${isItalic},${isUnderline},${isStrikeOut},100,100,${spacing},0,${borderStyle},${outlineW},${shadowW},7,10,10,10,1`)
+    // Alignment 5 = Middle-Center, matches the editor's center anchor
+    lines.push(`Style: ${styleName},${o.fontFamily || 'Arial'},${fontSize},${primary},${secondary},${outline},${back},${boldValue},${isItalic},${isUnderline},${isStrikeOut},100,100,${spacing},0,${borderStyle},${outlineW},${shadowW},5,10,10,10,1`)
   })
 
   lines.push('')
@@ -149,20 +139,18 @@ function exportOverlaysAsASS(overlays: TextOverlayData[], clipLabel: string, con
     const start = fmtTime(o.startTime)
     const end = fmtTime(o.endTime)
     let text = o.text.replace(/\n/g, '\\N')
-    const posX = Math.round(o.x * scaleX)
-    const posY = Math.round(o.y * scaleY)
+
+    // Calculate position based on PlayRes resolution and percentages
+    const posX = Math.round((o.x / 100) * targetW)
+    const posY = Math.round((o.y / 100) * targetH)
     text = `{\\pos(${posX},${posY})}${text}`
 
-    // If secondary outline is enabled, render it as a separate bottom-layer dialogue line
-    // with a larger border in the secondary color, behind the main text
     if (o.secondaryOutlineEnabled) {
-      const secOutlineW = Math.round(((o.outlineWidth || 2) + (o.secondaryOutlineWidth || 2)) * scaleFont)
+      const secOutlineW = (o.outlineWidth || 2) + (o.secondaryOutlineWidth || 2)
       const secColor = rgbToABGR(o.secondaryOutlineColor || '#FF0000', o.opacity ?? 1)
-      // Override tags: set outline color and width for the secondary border layer
       const secText = o.text.replace(/\n/g, '\\N')
       const secOverride = `{\\pos(${posX},${posY})\\3c${secColor}\\bord${secOutlineW}}`
       lines.push(`Dialogue: 0,${start},${end},${styleName},,0,0,0,,${secOverride}${secText}`)
-      // Main text on a higher layer
       lines.push(`Dialogue: 1,${start},${end},${styleName},,0,0,0,,${text}`)
     } else {
       lines.push(`Dialogue: 0,${start},${end},${styleName},,0,0,0,,${text}`)
@@ -199,7 +187,9 @@ export function TranslationTimelineEditor() {
   const { clips } = useSessionStore()
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const gridRef = useRef<HTMLDivElement>(null)
   const [currentTime, setCurrentTime] = useState(0)
+
   const [videoDuration, setVideoDuration] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [selectedClipId, setSelectedClipId] = useState<string | null>(clips.length > 0 ? clips[0].id : null)
@@ -260,6 +250,16 @@ export function TranslationTimelineEditor() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [lastSelectIdx, setLastSelectIdx] = useState(-1)
   const [isModified, setIsModified] = useState(false)
+
+  // Auto-scroll selected line into view
+  useEffect(() => {
+    if (selectedId && gridRef.current) {
+      const activeRow = gridRef.current.querySelector('.main-grid-row-active')
+      if (activeRow) {
+        activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      }
+    }
+  }, [selectedId])
 
   const [showOCR, setShowOCR] = useState(false)
   const [showTranslate, setShowTranslate] = useState(false)
@@ -405,11 +405,7 @@ export function TranslationTimelineEditor() {
 
   const handleExportASS = useCallback(() => {
     if (overlays.length === 0) return
-    const container = videoRef.current?.parentElement
-    const cw = container?.clientWidth || 1920
-    const ch = container?.clientHeight || 1080
-
-    const ass = exportOverlaysAsASS(overlays, selectedClip?.label || 'subtitle', cw, ch)
+    const ass = exportOverlaysAsASS(overlays, selectedClip?.label || 'subtitle')
     const blob = new Blob([ass], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -437,26 +433,25 @@ export function TranslationTimelineEditor() {
     setShowExportMenu(false)
   }, [overlays, selectedClip])
 
-  const { setExportJobId } = useSessionStore()
+  const { exportJobId, setExportJobId } = useSessionStore()
+  const { progress: exportProgress, status: exportStatus, message: exportMessage, error: exportError } = useJobProgress(exportJobId)
+  const [showExportModal, setShowExportModal] = useState(false)
+
   const handleExportVideoWithSubtitles = useCallback(async () => {
     if (!selectedClip || !videoId) return
-    const container = videoRef.current?.parentElement
-    const cw = container?.clientWidth || 1920
-    const ch = container?.clientHeight || 1080
 
-    const ass = exportOverlaysAsASS(overlays, selectedClip.label, cw, ch)
-    // Send all custom font files to the backend so FFmpeg's libass can find them by internal family name
+    const ass = exportOverlaysAsASS(overlays, selectedClip.label)
     const fontsToSend = customFontFiles.current.length > 0 ? customFontFiles.current : undefined
     try {
       const { jobId } = await submitExportWithSubtitles(videoId, selectedClip.start, selectedClip.end, ass, selectedClip.label, fontsToSend)
       setExportJobId(jobId)
-      navigate('/decision')
+      setShowExportModal(true)
     } catch (err) {
       console.error('Failed to export video with subtitles:', err)
       alert('Failed to start video export. Check console.')
     }
     setShowExportMenu(false)
-  }, [overlays, selectedClip, videoId, navigate, setExportJobId])
+  }, [overlays, selectedClip, videoId, setExportJobId])
 
 
 
@@ -1134,196 +1129,208 @@ export function TranslationTimelineEditor() {
 
       <div className="main-resize-handle" onMouseDown={handleResize} />
 
-      <div className="main-editbox" onKeyDown={editBoxKeyDown}>
-        {sel ? (<>
-          <div className="main-editbox-row">
-            <label className="main-editbox-control">
-              <span className="main-label">Font:</span>
-              <select value={sel.fontFamily} onChange={e => updateOverlay(sel.id, { fontFamily: e.target.value })} className="main-select">
-                {allFonts.map(f => <option key={f} value={f}>{f}</option>)}
-              </select>
-              <button className="main-tbtn" onClick={() => fontInputRef.current?.click()} title="Import Font"><Upload size={11} /></button>
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Size:</span>
-              <input type="number" value={sel.fontSize} onChange={e => updateOverlay(sel.id, { fontSize: parseInt(e.target.value) || 24 })} className="main-input main-input-xs" min={8} max={200} />
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Opacity:</span>
-              <input type="range" min="0" max="1" step="0.05" value={sel.opacity} onChange={e => updateOverlay(sel.id, { opacity: parseFloat(e.target.value) })} className="main-slider" />
-              <span className="main-label">{Math.round(sel.opacity * 100)}%</span>
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Anim:</span>
-              <select value={sel.animation} onChange={e => updateOverlay(sel.id, { animation: e.target.value as AnimationType })} className="main-select">
-                {ANIMATION_PRESETS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-              </select>
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Dur:</span>
-              <input type="number" step="0.1" value={sel.animationDuration} onChange={e => updateOverlay(sel.id, { animationDuration: parseFloat(e.target.value) || 0.5 })} className="main-input main-input-xs" style={{ width: 40 }} />
-            </label>
-          </div>
-          <div className="main-editbox-row">
-            <label className="main-editbox-control">
-              <span className="main-label">Intensity:</span>
-              <input type="range" min="0" max="1" step="0.1" value={sel.animationConfig?.intensity ?? 0.5} onChange={e => updateOverlay(sel.id, { animationConfig: { ...sel.animationConfig, intensity: parseFloat(e.target.value) } })} className="main-slider" />
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Ease:</span>
-              <select value={sel.animationConfig?.easing ?? 'easeOut'} onChange={e => updateOverlay(sel.id, { animationConfig: { ...sel.animationConfig, easing: e.target.value as AnimationConfig['easing'] } })} className="main-select">
-                <option value="linear">Linear</option>
-                <option value="easeIn">Ease In</option>
-                <option value="easeOut">Ease Out</option>
-                <option value="easeInOut">Ease In Out</option>
-                <option value="spring">Spring</option>
-              </select>
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Delay:</span>
-              <input type="number" step="0.1" value={sel.animationConfig?.delay ?? 0} onChange={e => updateOverlay(sel.id, { animationConfig: { ...sel.animationConfig, delay: parseFloat(e.target.value) || 0 } })} className="main-input main-input-xs" />
-            </label>
-            <label className="main-editbox-control">
-              <input type="checkbox" checked={sel.animationConfig?.loop ?? false} onChange={e => updateOverlay(sel.id, { animationConfig: { ...sel.animationConfig, loop: e.target.checked } })} className="main-checkbox" />
-              <span className="main-label">Loop</span>
-            </label>
-          </div>
-          <div className="main-editbox-row">
-            <label className="main-editbox-control">
-              <span className="main-label">Start:</span>
-              <input type="text" value={locStart} onChange={e => setLocStart(e.target.value)} onBlur={commitTimes} className="main-input main-input-time" />
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">End:</span>
-              <input type="text" value={locEnd} onChange={e => setLocEnd(e.target.value)} onBlur={commitTimes} className="main-input main-input-time" />
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Dur:</span>
-              <input type="text" value={locDur} onChange={e => { setLocDur(e.target.value); if (sel) { const d = parseTime(e.target.value); if (d > 0) { setLocEnd(fmtTime(sel.startTime + d)); updateOverlay(sel.id, { endTime: sel.startTime + d }) } } }} className="main-input main-input-time" />
-            </label>
-            <div className="main-editbox-separator" />
-            <label className="main-editbox-control">
-              <span className="main-label">X:</span>
-              <input type="number" value={Math.round(sel.x)} onChange={e => updateOverlay(sel.id, { x: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Y:</span>
-              <input type="number" value={Math.round(sel.y)} onChange={e => updateOverlay(sel.id, { y: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
-            </label>
-            <div className="main-editbox-separator" />
-            <label className="main-editbox-control">
-              <span className="main-label">Color:</span>
-              <input type="color" value={sel.color} onChange={e => updateOverlay(sel.id, { color: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0 }} />
-            </label>
-            <label className="main-editbox-control">
-              <input type="checkbox" checked={sel.bgEnabled ?? true} onChange={e => updateOverlay(sel.id, { bgEnabled: e.target.checked })} className="main-checkbox" />
-              <span className="main-label">BG:</span>
-              <input type="color" disabled={!(sel.bgEnabled ?? true)} value={sel.backgroundColor || '#000000'} onChange={e => updateOverlay(sel.id, { backgroundColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: !sel.bgEnabled ? 'default' : 'pointer', padding: 0, opacity: !sel.bgEnabled ? 0.3 : 1 }} />
-            </label>
-          </div>
-          <div className="main-editbox-row">
-            <label className="main-editbox-control">
-              <input type="checkbox" checked={sel.outlineEnabled ?? false} onChange={e => updateOverlay(sel.id, { outlineEnabled: e.target.checked })} className="main-checkbox" />
-              <span className="main-label">Outline 1:</span>
-              <input type="color" disabled={!sel.outlineEnabled} value={sel.outlineColor || '#000000'} onChange={e => updateOverlay(sel.id, { outlineColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.outlineEnabled ? 0.3 : 1 }} />
-              <input type="number" disabled={!sel.outlineEnabled} value={sel.outlineWidth ?? 2} onChange={e => updateOverlay(sel.id, { outlineWidth: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 32, opacity: !sel.outlineEnabled ? 0.3 : 1 }} />
-            </label>
-            <div className="main-editbox-separator" />
-            <label className="main-editbox-control">
-              <input type="checkbox" checked={sel.secondaryOutlineEnabled ?? false} onChange={e => updateOverlay(sel.id, { secondaryOutlineEnabled: e.target.checked })} className="main-checkbox" />
-              <span className="main-label">Outline 2:</span>
-              <input type="color" disabled={!sel.secondaryOutlineEnabled} value={sel.secondaryOutlineColor || '#FF0000'} onChange={e => updateOverlay(sel.id, { secondaryOutlineColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.secondaryOutlineEnabled ? 0.3 : 1 }} />
-              <input type="number" disabled={!sel.secondaryOutlineEnabled} value={sel.secondaryOutlineWidth ?? 2} onChange={e => updateOverlay(sel.id, { secondaryOutlineWidth: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 32, opacity: !sel.secondaryOutlineEnabled ? 0.3 : 1 }} />
-            </label>
-            <div className="main-editbox-separator" />
-            <label className="main-editbox-control">
-              <input type="checkbox" checked={sel.gradientEnabled ?? false} onChange={e => updateOverlay(sel.id, { gradientEnabled: e.target.checked })} className="main-checkbox" />
-              <span className="main-label">Gradient:</span>
-              <input type="color" disabled={!sel.gradientEnabled} value={sel.gradientColors?.[0] || '#FFFFFF'} onChange={e => updateOverlay(sel.id, { gradientColors: [e.target.value, sel.gradientColors?.[1] || '#000000'] })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
-              <input type="color" disabled={!sel.gradientEnabled} value={sel.gradientColors?.[1] || '#000000'} onChange={e => updateOverlay(sel.id, { gradientColors: [sel.gradientColors?.[0] || '#FFFFFF', e.target.value] })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
-              <input type="number" disabled={!sel.gradientEnabled} value={sel.gradientAngle ?? 180} onChange={e => updateOverlay(sel.id, { gradientAngle: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 40, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
-            </label>
-          </div>
-          <div className="main-editbox-row">
-            <label className="main-editbox-control">
-              <span className="main-label">Spacing:</span>
-              <input type="number" step="0.5" value={sel.letterSpacing ?? 0} onChange={e => updateOverlay(sel.id, { letterSpacing: parseFloat(e.target.value) || 0 })} className="main-input main-input-xs" />
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Weight:</span>
-              <select value={sel.fontWeight ?? 400} onChange={e => updateOverlay(sel.id, { fontWeight: parseInt(e.target.value) })} className="main-select">
-                {[100, 200, 300, 400, 500, 600, 700, 800, 900].map(w => <option key={w} value={w}>{w}</option>)}
-              </select>
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Padding:</span>
-              <input type="number" value={sel.padding ?? 8} onChange={e => updateOverlay(sel.id, { padding: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
-            </label>
-            <label className="main-editbox-control">
-              <span className="main-label">Radius:</span>
-              <input type="number" value={sel.borderRadius ?? 4} onChange={e => updateOverlay(sel.id, { borderRadius: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
-            </label>
-            <label className="main-editbox-control" title="Example: 2px 2px 4px rgba(0,0,0,0.8)">
-              <span className="main-label">Shadow:</span>
-              <input type="text" value={sel.textShadowCustom ?? ''} onChange={e => updateOverlay(sel.id, { textShadowCustom: e.target.value })} className="main-input" style={{ width: 100 }} placeholder="2px 2px 4px..." />
-            </label>
-          </div>
-          <div className="main-editbox-row main-toolbar-row">
-            <button className="main-tbtn" title="Bold" onClick={() => insertTag('b1')}><Bold size={13} /></button>
-            <button className="main-tbtn" title="Italic" onClick={() => insertTag('i1')}><Italic size={13} /></button>
-            <button className="main-tbtn" title="Underline" onClick={() => insertTag('u1')}><Underline size={13} /></button>
-            <button className="main-tbtn" title="Strikeout" onClick={() => insertTag('s1')}><Strikethrough size={13} /></button>
-            <button className="main-tbtn" title="Font" onClick={() => insertTag('fnArial')}><Type size={13} /></button>
-          </div>
-          <textarea ref={textareaRef} value={locText}
-            onChange={e => { setLocText(e.target.value); updateOverlay(sel.id, { text: e.target.value }) }}
-            className="main-textarea" rows={2} placeholder="Enter subtitle text..." spellCheck={false}
-          />
-        </>) : (
-          <div className="main-editbox-empty">Select a subtitle line to edit</div>
-        )}
-      </div>
+      <div className="main-subtitle-area" style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+        <div className="main-editbox" onKeyDown={editBoxKeyDown}>
+          {sel ? (<>
+            <div className="main-editbox-row">
+              <label className="main-editbox-control">
+                <span className="main-label">Font:</span>
+                <select value={sel.fontFamily} onChange={e => updateOverlay(sel.id, { fontFamily: e.target.value })} className="main-select">
+                  {allFonts.map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+                <button className="main-tbtn" onClick={() => fontInputRef.current?.click()} title="Import Font"><Upload size={11} /></button>
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Size:</span>
+                <input type="number" value={sel.fontSize} onChange={e => updateOverlay(sel.id, { fontSize: parseInt(e.target.value) || 24 })} className="main-input main-input-xs" min={8} max={200} />
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Opacity:</span>
+                <input type="range" min="0" max="1" step="0.05" value={sel.opacity} onChange={e => updateOverlay(sel.id, { opacity: parseFloat(e.target.value) })} className="main-slider" />
+                <span className="main-label">{Math.round(sel.opacity * 100)}%</span>
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Anim:</span>
+                <select value={sel.animation} onChange={e => updateOverlay(sel.id, { animation: e.target.value as AnimationType })} className="main-select">
+                  {ANIMATION_PRESETS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Dur:</span>
+                <input type="number" step="0.1" value={sel.animationDuration} onChange={e => updateOverlay(sel.id, { animationDuration: parseFloat(e.target.value) || 0.5 })} className="main-input main-input-xs" style={{ width: 40 }} />
+              </label>
+            </div>
+            <div className="main-editbox-row">
+              <label className="main-editbox-control">
+                <span className="main-label">Intensity:</span>
+                <input type="range" min="0" max="1" step="0.1" value={sel.animationConfig?.intensity ?? 0.5} onChange={e => updateOverlay(sel.id, { animationConfig: { ...sel.animationConfig, intensity: parseFloat(e.target.value) } })} className="main-slider" />
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Ease:</span>
+                <select value={sel.animationConfig?.easing ?? 'easeOut'} onChange={e => updateOverlay(sel.id, { animationConfig: { ...sel.animationConfig, easing: e.target.value as AnimationConfig['easing'] } })} className="main-select">
+                  <option value="linear">Linear</option>
+                  <option value="easeIn">Ease In</option>
+                  <option value="easeOut">Ease Out</option>
+                  <option value="easeInOut">Ease In Out</option>
+                  <option value="spring">Spring</option>
+                </select>
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Delay:</span>
+                <input type="number" step="0.1" value={sel.animationConfig?.delay ?? 0} onChange={e => updateOverlay(sel.id, { animationConfig: { ...sel.animationConfig, delay: parseFloat(e.target.value) || 0 } })} className="main-input main-input-xs" />
+              </label>
+              <label className="main-editbox-control">
+                <input type="checkbox" checked={sel.animationConfig?.loop ?? false} onChange={e => updateOverlay(sel.id, { animationConfig: { ...sel.animationConfig, loop: e.target.checked } })} className="main-checkbox" />
+                <span className="main-label">Loop</span>
+              </label>
+            </div>
+            <div className="main-editbox-row">
+              <label className="main-editbox-control">
+                <span className="main-label">Start:</span>
+                <input type="text" value={locStart} onChange={e => setLocStart(e.target.value)} onBlur={commitTimes} className="main-input main-input-time" />
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">End:</span>
+                <input type="text" value={locEnd} onChange={e => setLocEnd(e.target.value)} onBlur={commitTimes} className="main-input main-input-time" />
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Dur:</span>
+                <input type="text" value={locDur} onChange={e => { setLocDur(e.target.value); if (sel) { const d = parseTime(e.target.value); if (d > 0) { setLocEnd(fmtTime(sel.startTime + d)); updateOverlay(sel.id, { endTime: sel.startTime + d }) } } }} className="main-input main-input-time" />
+              </label>
+              <div className="main-editbox-separator" />
+              <label className="main-editbox-control">
+                <span className="main-label">X:</span>
+                <input type="number" value={Math.round(sel.x)} onChange={e => updateOverlay(sel.id, { x: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
+                <div style={{ display: 'flex', gap: 1 }}>
+                  <button className="main-tbtn main-tbtn-xs" onClick={() => updateOverlay(sel.id, { x: 10 })}>L</button>
+                  <button className="main-tbtn main-tbtn-xs" onClick={() => updateOverlay(sel.id, { x: 50 })}>C</button>
+                  <button className="main-tbtn main-tbtn-xs" onClick={() => updateOverlay(sel.id, { x: 90 })}>R</button>
+                </div>
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Y:</span>
+                <input type="number" value={Math.round(sel.y)} onChange={e => updateOverlay(sel.id, { y: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
+                <div style={{ display: 'flex', gap: 1 }}>
+                  <button className="main-tbtn main-tbtn-xs" onClick={() => updateOverlay(sel.id, { y: 10 })}>T</button>
+                  <button className="main-tbtn main-tbtn-xs" onClick={() => updateOverlay(sel.id, { y: 50 })}>M</button>
+                  <button className="main-tbtn main-tbtn-xs" onClick={() => updateOverlay(sel.id, { y: 90 })}>B</button>
+                </div>
+              </label>
+              <div className="main-editbox-separator" />
+              <label className="main-editbox-control">
+                <span className="main-label">Color:</span>
+                <input type="color" value={sel.color} onChange={e => updateOverlay(sel.id, { color: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0 }} />
+              </label>
+              <label className="main-editbox-control">
+                <input type="checkbox" checked={sel.bgEnabled ?? true} onChange={e => updateOverlay(sel.id, { bgEnabled: e.target.checked })} className="main-checkbox" />
+                <span className="main-label">BG:</span>
+                <input type="color" disabled={!(sel.bgEnabled ?? true)} value={sel.backgroundColor || '#000000'} onChange={e => updateOverlay(sel.id, { backgroundColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: !sel.bgEnabled ? 'default' : 'pointer', padding: 0, opacity: !sel.bgEnabled ? 0.3 : 1 }} />
+              </label>
+            </div>
+            <div className="main-editbox-row">
+              <label className="main-editbox-control">
+                <input type="checkbox" checked={sel.outlineEnabled ?? false} onChange={e => updateOverlay(sel.id, { outlineEnabled: e.target.checked })} className="main-checkbox" />
+                <span className="main-label">Outline 1:</span>
+                <input type="color" disabled={!sel.outlineEnabled} value={sel.outlineColor || '#000000'} onChange={e => updateOverlay(sel.id, { outlineColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.outlineEnabled ? 0.3 : 1 }} />
+                <input type="number" disabled={!sel.outlineEnabled} value={sel.outlineWidth ?? 2} onChange={e => updateOverlay(sel.id, { outlineWidth: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 32, opacity: !sel.outlineEnabled ? 0.3 : 1 }} />
+              </label>
+              <div className="main-editbox-separator" />
+              <label className="main-editbox-control">
+                <input type="checkbox" checked={sel.secondaryOutlineEnabled ?? false} onChange={e => updateOverlay(sel.id, { secondaryOutlineEnabled: e.target.checked })} className="main-checkbox" />
+                <span className="main-label">Outline 2:</span>
+                <input type="color" disabled={!sel.secondaryOutlineEnabled} value={sel.secondaryOutlineColor || '#FF0000'} onChange={e => updateOverlay(sel.id, { secondaryOutlineColor: e.target.value })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.secondaryOutlineEnabled ? 0.3 : 1 }} />
+                <input type="number" disabled={!sel.secondaryOutlineEnabled} value={sel.secondaryOutlineWidth ?? 2} onChange={e => updateOverlay(sel.id, { secondaryOutlineWidth: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 32, opacity: !sel.secondaryOutlineEnabled ? 0.3 : 1 }} />
+              </label>
+              <div className="main-editbox-separator" />
+              <label className="main-editbox-control">
+                <input type="checkbox" checked={sel.gradientEnabled ?? false} onChange={e => updateOverlay(sel.id, { gradientEnabled: e.target.checked })} className="main-checkbox" />
+                <span className="main-label">Gradient:</span>
+                <input type="color" disabled={!sel.gradientEnabled} value={sel.gradientColors?.[0] || '#FFFFFF'} onChange={e => updateOverlay(sel.id, { gradientColors: [e.target.value, sel.gradientColors?.[1] || '#000000'] })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
+                <input type="color" disabled={!sel.gradientEnabled} value={sel.gradientColors?.[1] || '#000000'} onChange={e => updateOverlay(sel.id, { gradientColors: [sel.gradientColors?.[0] || '#FFFFFF', e.target.value] })} style={{ width: 22, height: 22, border: '1px solid #45475a', borderRadius: 2, cursor: 'pointer', padding: 0, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
+                <input type="number" disabled={!sel.gradientEnabled} value={sel.gradientAngle ?? 180} onChange={e => updateOverlay(sel.id, { gradientAngle: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" style={{ width: 40, opacity: !sel.gradientEnabled ? 0.3 : 1 }} />
+              </label>
+            </div>
+            <div className="main-editbox-row">
+              <label className="main-editbox-control">
+                <span className="main-label">Spacing:</span>
+                <input type="number" step="0.5" value={sel.letterSpacing ?? 0} onChange={e => updateOverlay(sel.id, { letterSpacing: parseFloat(e.target.value) || 0 })} className="main-input main-input-xs" />
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Weight:</span>
+                <select value={sel.fontWeight ?? 400} onChange={e => updateOverlay(sel.id, { fontWeight: parseInt(e.target.value) })} className="main-select">
+                  {[100, 200, 300, 400, 500, 600, 700, 800, 900].map(w => <option key={w} value={w}>{w}</option>)}
+                </select>
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Padding:</span>
+                <input type="number" value={sel.padding ?? 8} onChange={e => updateOverlay(sel.id, { padding: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
+              </label>
+              <label className="main-editbox-control">
+                <span className="main-label">Radius:</span>
+                <input type="number" value={sel.borderRadius ?? 4} onChange={e => updateOverlay(sel.id, { borderRadius: parseInt(e.target.value) || 0 })} className="main-input main-input-xs" />
+              </label>
+              <label className="main-editbox-control" title="Example: 2px 2px 4px rgba(0,0,0,0.8)">
+                <span className="main-label">Shadow:</span>
+                <input type="text" value={sel.textShadowCustom ?? ''} onChange={e => updateOverlay(sel.id, { textShadowCustom: e.target.value })} className="main-input" style={{ width: 100 }} placeholder="2px 2px 4px..." />
+              </label>
+            </div>
+            <div className="main-editbox-row main-toolbar-row">
+              <button className="main-tbtn" title="Bold" onClick={() => insertTag('b1')}><Bold size={13} /></button>
+              <button className="main-tbtn" title="Italic" onClick={() => insertTag('i1')}><Italic size={13} /></button>
+              <button className="main-tbtn" title="Underline" onClick={() => insertTag('u1')}><Underline size={13} /></button>
+              <button className="main-tbtn" title="Strikeout" onClick={() => insertTag('s1')}><Strikethrough size={13} /></button>
+              <button className="main-tbtn" title="Font" onClick={() => insertTag('fnArial')}><Type size={13} /></button>
+            </div>
+            <textarea ref={textareaRef} value={locText}
+              onChange={e => { setLocText(e.target.value); updateOverlay(sel.id, { text: e.target.value }) }}
+              className="main-textarea" rows={2} placeholder="Enter subtitle text..." spellCheck={false}
+            />
+          </>) : (
+            <div className="main-editbox-empty">Select a subtitle line to edit</div>
+          )}
+        </div>
 
-      <div className="main-grid" tabIndex={0} onKeyDown={e => {
-        if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); moveLines(e.key === 'ArrowUp' ? 'up' : 'down') }
-      }}>
-        <table className="main-grid-table">
-          <thead>
-            <tr className="main-grid-header">
-              <th className="main-grid-col-num">#</th>
-              <th className="main-grid-col-time">Start</th>
-              <th className="main-grid-col-time">End</th>
-              <th className="main-grid-col-style">Font</th>
-              <th className="main-grid-col-margin">Size</th>
-              <th className="main-grid-col-style">Anim</th>
-              <th className="main-grid-col-margin">X</th>
-              <th className="main-grid-col-margin">Y</th>
-              <th className="main-grid-col-text">Text</th>
-              <th className="main-grid-col-cps">CPS</th>
-            </tr>
-          </thead>
-          <tbody>
-            {overlays.map((o, i) => {
-              const c = cps(o)
-              return (
-                <tr key={o.id} className={getRowClass(o)}
-                  onClick={e => selectOverlay(o.id, e.ctrlKey, e.shiftKey)}
-                >
-                  <td className="main-grid-col-num">{i + 1}</td>
-                  <td className="main-grid-col-time">{fmtTime(o.startTime)}</td>
-                  <td className="main-grid-col-time">{fmtTime(o.endTime)}</td>
-                  <td className="main-grid-col-style">{o.fontFamily}</td>
-                  <td className="main-grid-col-margin">{o.fontSize}</td>
-                  <td className="main-grid-col-style">{o.animation}</td>
-                  <td className="main-grid-col-margin">{Math.round(o.x)}</td>
-                  <td className="main-grid-col-margin">{Math.round(o.y)}</td>
-                  <td className="main-grid-col-text">{o.text || '(empty)'}</td>
-                  <td className={`main-grid-col-cps ${cpsClass(c)}`}>{c}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+        <div ref={gridRef} className="main-grid" style={{ flex: 'none', overflow: 'visible' }} tabIndex={0} onKeyDown={e => {
+          if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); moveLines(e.key === 'ArrowUp' ? 'up' : 'down') }
+        }}>
+          <table className="main-grid-table">
+            <thead>
+              <tr className="main-grid-header">
+                <th className="main-grid-col-num">#</th>
+                <th className="main-grid-col-time">Start</th>
+                <th className="main-grid-col-time">End</th>
+                <th className="main-grid-col-style">Font</th>
+                <th className="main-grid-col-margin">Size</th>
+                <th className="main-grid-col-style">Anim</th>
+                <th className="main-grid-col-margin">X</th>
+                <th className="main-grid-col-margin">Y</th>
+                <th className="main-grid-col-text">Text</th>
+                <th className="main-grid-col-cps">CPS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {overlays.map((o, i) => {
+                const c = cps(o)
+                return (
+                  <tr key={o.id} className={getRowClass(o)}
+                    onClick={e => selectOverlay(o.id, e.ctrlKey, e.shiftKey)}
+                  >
+                    <td className="main-grid-col-num">{i + 1}</td>
+                    <td className="main-grid-col-time">{fmtTime(o.startTime)}</td>
+                    <td className="main-grid-col-time">{fmtTime(o.endTime)}</td>
+                    <td className="main-grid-col-style">{o.fontFamily}</td>
+                    <td className="main-grid-col-margin">{o.fontSize}</td>
+                    <td className="main-grid-col-style">{o.animation}</td>
+                    <td className="main-grid-col-margin">{Math.round(o.x)}</td>
+                    <td className="main-grid-col-margin">{Math.round(o.y)}</td>
+                    <td className="main-grid-col-text">{o.text || '(empty)'}</td>
+                    <td className={`main-grid-col-cps ${cpsClass(c)}`}>{c}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="main-statusbar">
@@ -1438,6 +1445,41 @@ export function TranslationTimelineEditor() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Export Progress Modal ── */}
+      {showExportModal && exportJobId && (
+        <Modal
+          isOpen={showExportModal}
+          onClose={() => { setShowExportModal(false); setExportJobId(null); }}
+          title="Exporting Video"
+        >
+          <div className="space-y-4 py-2">
+            <div>
+              <div className="flex justify-between text-xs text-gray-400 mb-2">
+                <span>{exportMessage || 'Burning subtitles...'}</span>
+                <span className="font-semibold">{exportProgress}%</span>
+              </div>
+              <ProgressBar progress={exportProgress} />
+            </div>
+
+            {exportError && (
+              <div className="bg-red-500/20 border border-red-500 text-red-400 px-3 py-2 rounded-lg text-xs">
+                {exportError}
+              </div>
+            )}
+
+            {exportStatus === 'done' && (
+              <button
+                onClick={() => window.location.href = getDownloadUrl(exportJobId)}
+                className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors flex items-center justify-center gap-2 text-sm font-semibold"
+              >
+                <Download size={16} />
+                Download Merged Video
+              </button>
+            )}
+          </div>
+        </Modal>
       )}
     </div>
   )

@@ -87,7 +87,7 @@ func (h *ClipHandler) CreateClip(c *gin.Context) {
 
 	clipID := uuid.New().String()
 	clipPath := h.store.ClipPath(clipID)
-	videoPath := h.store.VideoPath(req.VideoID)
+	videoPath := h.store.ResolveVideoPath(req.VideoID)
 
 	job := h.queue.New()
 

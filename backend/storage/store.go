@@ -39,6 +39,21 @@ func (s *Store) VideoPath(videoID string) string {
 	return filepath.Join(s.cfg.VideosDir(), videoID+".mp4")
 }
 
+func (s *Store) ResolveVideoPath(videoID string) string {
+	path := s.VideoPath(videoID)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+
+	// Try partial matches
+	matches, _ := filepath.Glob(filepath.Join(s.cfg.VideosDir(), videoID+"_*.mp4"))
+	if len(matches) > 0 {
+		return matches[len(matches)-1] // Use the most recent
+	}
+
+	return path // Fallback to default
+}
+
 func (s *Store) ClipPath(clipID string) string {
 	return filepath.Join(s.cfg.ClipsDir(), clipID+".mp4")
 }
@@ -64,27 +79,22 @@ func (s *Store) VideosDir() string {
 func (s *Store) VideoExists(videoID string) bool {
 	path := s.VideoPath(videoID)
 	log.Printf("[DEBUG] VideoExists: Checking for video ID: %s", videoID)
-	log.Printf("[DEBUG] VideoExists: Checking path: %s", path)
 
 	_, err := os.Stat(path)
-	if err != nil {
-		log.Printf("[DEBUG] VideoExists: File not found at path: %s (error: %v)", path, err)
-		videosDir := s.VideosDir()
-		log.Printf("[DEBUG] VideoExists: Videos directory: %s", videosDir)
-		files, readErr := os.ReadDir(videosDir)
-		if readErr != nil {
-			log.Printf("[DEBUG] VideoExists: Error reading directory: %v", readErr)
-		} else {
-			log.Printf("[DEBUG] VideoExists: Looking for %s.mp4 in directory: %s", videoID, videosDir)
-			log.Printf("[DEBUG] VideoExists: Files in directory (%d total):", len(files))
-			for _, file := range files {
-				log.Printf("[DEBUG] VideoExists:   - %s (isDir: %v)", file.Name(), file.IsDir())
-			}
-		}
-		return false
+	if err == nil {
+		log.Printf("[DEBUG] VideoExists: File found at path: %s", path)
+		return true
 	}
-	log.Printf("[DEBUG] VideoExists: File found at path: %s", path)
-	return true
+
+	// Check for partial download files
+	matches, _ := filepath.Glob(filepath.Join(s.cfg.VideosDir(), videoID+"_*.mp4"))
+	if len(matches) > 0 {
+		log.Printf("[DEBUG] VideoExists: Partial file found: %s", matches[0])
+		return true
+	}
+
+	log.Printf("[DEBUG] VideoExists: No video files found for ID: %s", videoID)
+	return false
 }
 
 func (s *Store) ClipExists(clipID string) bool {

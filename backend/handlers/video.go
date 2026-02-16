@@ -38,8 +38,16 @@ func NewVideoHandler(queue *jobs.JobQueue, store *storage.Store, ytdlp *services
 }
 
 type VideoRequest struct {
-	URL     string `json:"url" binding:"required"`
-	Quality string `json:"quality,omitempty"` // "best", "1080p", "720p", "480p", "360p", "worst"
+	URL          string `json:"url" binding:"required"`
+	Quality      string `json:"quality,omitempty"`
+	MetadataOnly bool   `json:"metadataOnly,omitempty"`
+}
+
+type DownloadPartialRequest struct {
+	URL     string  `json:"url" binding:"required"`
+	Quality string  `json:"quality,omitempty"`
+	Start   float64 `json:"start"`
+	End     float64 `json:"end"`
 }
 
 type VideoResponse struct {
@@ -103,6 +111,16 @@ func (h *VideoHandler) SubmitVideo(c *gin.Context) {
 		}
 	}
 
+	// Metadata-only mode: return metadata without downloading
+	if req.MetadataOnly {
+		c.JSON(http.StatusOK, VideoResponse{
+			JobID:   "",
+			VideoID: videoID,
+			Video:   videoMeta,
+		})
+		return
+	}
+
 	job := h.queue.New()
 
 	quality := req.Quality
@@ -111,7 +129,7 @@ func (h *VideoHandler) SubmitVideo(c *gin.Context) {
 	}
 
 	downloadTask := func() error {
-		video, err := h.ytdlp.DownloadVideo(req.URL, h.store.VideosDir(), job, quality)
+		video, err := h.ytdlp.DownloadVideo(req.URL, h.store.VideosDir(), job, quality, 0, 0)
 		if err != nil {
 			job.Status = models.JobError
 			job.Error = err.Error()
@@ -164,6 +182,72 @@ func (h *VideoHandler) SubmitVideo(c *gin.Context) {
 }
 
 /*
+ * [DownloadPartial]
+ * - Download only a specific time range of a YouTube video
+ * - Uses yt-dlp --download-sections to fetch only the needed segment
+ */
+func (h *VideoHandler) DownloadPartial(c *gin.Context) {
+	videoID := c.Param("id")
+
+	var req DownloadPartialRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	quality := req.Quality
+
+	if quality == "" {
+		quality = "best"
+	}
+
+	job := h.queue.New()
+
+	downloadTask := func() error {
+		video, err := h.ytdlp.DownloadVideo(req.URL, h.store.VideosDir(), job, quality, req.Start, req.End)
+		if err != nil {
+			job.Status = models.JobError
+			job.Error = err.Error()
+			select {
+			case job.Updates <- models.JobUpdate{Status: models.JobError, Error: err.Error()}:
+			default:
+			}
+			close(job.Updates)
+			return err
+		}
+
+		video.ID = videoID
+		if err := h.store.SaveVideoMeta(videoID, video); err != nil {
+			log.Printf("[WARN] DownloadPartial: Failed to save meta: %v", err)
+		}
+
+		job.Output = videoID
+		job.Status = models.JobDone
+		select {
+		case job.Updates <- models.JobUpdate{
+			Status: models.JobDone, Progress: 100, Message: "Complete", Output: videoID,
+		}:
+		default:
+		}
+		close(job.Updates)
+		return nil
+	}
+
+	h.downloadQueue.Enqueue(jobs.DownloadQueueItem{
+		Job:     job,
+		VideoID: videoID,
+		URL:     req.URL,
+		Quality: quality,
+		Task:    downloadTask,
+	})
+
+	c.JSON(http.StatusOK, VideoResponse{
+		JobID:   job.ID,
+		VideoID: videoID,
+	})
+}
+
+/*
  * [extractVideoID]
  * - Match various YouTube URL formats:
  *   - youtube.com/watch?v=VIDEO_ID
@@ -199,7 +283,7 @@ func (h *VideoHandler) GetVideo(c *gin.Context) {
 	if err != nil {
 		video = &models.Video{
 			ID:       videoID,
-			FilePath: h.store.VideoPath(videoID),
+			FilePath: h.store.ResolveVideoPath(videoID),
 		}
 	}
 
@@ -218,18 +302,13 @@ func (h *VideoHandler) ServeVideoFile(c *gin.Context) {
 	log.Printf("[DEBUG] ServeVideoFile: Request received for video ID: %s", videoID)
 	log.Printf("[DEBUG] ServeVideoFile: Request method: %s", c.Request.Method)
 
-	videoPath := h.store.VideoPath(videoID)
-	log.Printf("[DEBUG] ServeVideoFile: Video path: %s", videoPath)
-
+	// Try to resolve the video file (handles full and partial downloads)
+	videoPath := h.store.ResolveVideoPath(videoID)
 	if _, err := os.Stat(videoPath); os.IsNotExist(err) {
-		log.Printf("[DEBUG] ServeVideoFile: Video file does not exist at path: %s", videoPath)
-		videosDir := h.store.VideosDir()
-		files, _ := os.ReadDir(videosDir)
-		log.Printf("[DEBUG] ServeVideoFile: Files in videos directory (%s):", videosDir)
-		for _, file := range files {
-			log.Printf("[DEBUG] ServeVideoFile:   - %s", file.Name())
+		if c.Request.Method != "HEAD" {
+			log.Printf("[DEBUG] ServeVideoFile: Video file not found: %s", videoPath)
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "Video file not found", "videoId": videoID, "path": videoPath})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Video file not found", "videoId": videoID})
 		return
 	}
 

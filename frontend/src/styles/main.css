@@ -352,6 +352,9 @@
 }
 
 .main-grid-header th {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   padding: 3px 4px;
   text-align: left;
   font-weight: 600;
@@ -794,4 +797,51 @@
 
 .main-radio-label input[type="radio"] {
   accent-color: #89b4fa;
+}
+
+/* ── Mode Selector ─────────────────────────────── */
+.main-mode-selector {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.main-mode-card {
+  flex: 1;
+  background: rgba(49, 50, 68, 0.2);
+  border: 1px solid #313244;
+  border-radius: 8px;
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  text-align: center;
+  user-select: none;
+}
+
+.main-mode-card:hover {
+  background: rgba(49, 50, 68, 0.4);
+  border-color: #45475a;
+  transform: translateY(-2px);
+}
+
+.main-mode-card.active {
+  background: rgba(137, 180, 250, 0.1);
+  border-color: #89b4fa;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 0 10px rgba(137, 180, 250, 0.1);
+}
+
+.main-mode-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #cdd6f4;
+}
+
+.main-mode-card-desc {
+  font-size: 11px;
+  color: #6c7086;
+  line-height: 1.4;
 }

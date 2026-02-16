@@ -159,8 +159,8 @@ export function getAllFonts(customFonts: CustomFont[]): string[] {
 export interface TextOverlayData {
   id: string
   text: string
-  x: number
-  y: number
+  x: number // Percentage 0-100
+  y: number // Percentage 0-100
   fontSize: number
   fontFamily: string
   color: string
@@ -200,8 +200,8 @@ export function createDefaultOverlay(startTime: number): TextOverlayData {
   return {
     id: crypto.randomUUID(),
     text: '',
-    x: 200,
-    y: 200,
+    x: 50, // Center
+    y: 85, // Bottom area
     fontSize: 32,
     fontFamily: 'Arial',
     color: '#FFFFFF',
@@ -418,15 +418,33 @@ export function TextOverlay({ overlay, currentTime, isSelected, onSelect, onUpda
   /* ── drag handlers ─────────────────────────────────── */
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.target === e.currentTarget || (e.target as HTMLElement).closest('.text-content')) {
+      const parent = (e.currentTarget as HTMLElement).parentElement
+      if (!parent) return
+
       setIsDragging(true)
-      setDragStart({ x: e.clientX - overlay.x, y: e.clientY - overlay.y })
       onSelect()
+
+      const rect = parent.getBoundingClientRect()
+
+      const onMouseMove = (ev: MouseEvent) => {
+        const nx = ((ev.clientX - rect.left) / rect.width) * 100
+        const ny = ((ev.clientY - rect.top) / rect.height) * 100
+        onUpdate({
+          x: Math.max(0, Math.min(100, nx)),
+          y: Math.max(0, Math.min(100, ny))
+        })
+      }
+
+      const onMouseUp = () => {
+        setIsDragging(false)
+        window.removeEventListener('mousemove', onMouseMove)
+        window.removeEventListener('mouseup', onMouseUp)
+      }
+
+      window.addEventListener('mousemove', onMouseMove)
+      window.addEventListener('mouseup', onMouseUp)
     }
   }
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (isDragging) onUpdate({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y })
-  }
-  const handleMouseUp = () => setIsDragging(false)
 
   /* ── transition config ─────────────────────────────── */
   const getTransition = () => {
@@ -439,15 +457,14 @@ export function TextOverlay({ overlay, currentTime, isSelected, onSelect, onUpda
     <motion.div
       className={`absolute cursor-move ${isSelected ? 'ring-2 ring-blue-500' : ''}`}
       style={{
-        left: `${overlay.x}px`,
-        top: `${overlay.y}px`,
+        left: `${overlay.x}%`,
+        top: `${overlay.y}%`,
+        translateX: '-50%',
+        translateY: '-50%',
         zIndex: isSelected ? 1000 : 100,
         perspective: '800px',
       }}
       onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
       animate={animStyle}
       transition={getTransition()}
     >

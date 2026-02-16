@@ -1,4 +1,4 @@
-import type { Clip, JobUpdate, Video } from '../types'
+import type { Clip, JobUpdate, Video, QualityInfo } from '../types'
 
 const API_BASE = '/api'
 
@@ -19,10 +19,10 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   return response.json()
 }
 
-export async function submitVideoUrl(url: string, quality?: string): Promise<{ jobId: string, videoId: string, video?: Video }> {
+export async function submitVideoUrl(url: string, quality?: string, metadataOnly?: boolean): Promise<{ jobId: string, videoId: string, video?: Video }> {
   return fetchJSON<{ jobId: string, videoId: string, video?: Video }>(`${API_BASE}/video`, {
     method: 'POST',
-    body: JSON.stringify({ url, quality }),
+    body: JSON.stringify({ url, quality, metadataOnly: metadataOnly ?? false }),
   })
 }
 
@@ -121,7 +121,14 @@ export async function openVideoFolder(videoId: string): Promise<void> {
   await fetchJSON(`${API_BASE}/video/${videoId}/open-folder`, { method: 'POST' })
 }
 
-export async function getAvailableQualities(url: string): Promise<string[]> {
+export async function downloadPartial(videoId: string, url: string, quality: string, start: number, end: number): Promise<{ jobId: string, videoId: string }> {
+  return fetchJSON<{ jobId: string, videoId: string }>(`${API_BASE}/video/${videoId}/download`, {
+    method: 'POST',
+    body: JSON.stringify({ url, quality, start, end }),
+  })
+}
+
+export async function getAvailableQualities(url: string): Promise<QualityInfo[]> {
   const response = await fetch(`${API_BASE}/video/qualities?url=${encodeURIComponent(url)}`)
   if (!response.ok) {
     throw new Error('Failed to fetch available qualities')

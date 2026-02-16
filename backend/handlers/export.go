@@ -66,7 +66,7 @@ func (h *ExportHandler) ExportClips(c *gin.Context) {
 			clipPath := h.store.ClipPath(clip.ID)
 
 			if !h.store.ClipExists(clip.ID) {
-				videoPath := h.store.VideoPath(clip.VideoID)
+				videoPath := h.store.ResolveVideoPath(clip.VideoID)
 				if err := h.ffmpeg.ClipVideo(videoPath, clip.Start, clip.End, clipPath); err != nil {
 					return err
 				}
@@ -150,7 +150,7 @@ func (h *ExportHandler) ExportClipsIndividually(c *gin.Context) {
 			clipPath := h.store.ClipPath(clip.ID)
 
 			if !h.store.ClipExists(clip.ID) {
-				videoPath := h.store.VideoPath(clip.VideoID)
+				videoPath := h.store.ResolveVideoPath(clip.VideoID)
 				if err := h.ffmpeg.ClipVideo(videoPath, clip.Start, clip.End, clipPath); err != nil {
 					return err
 				}
@@ -248,7 +248,7 @@ func (h *ExportHandler) ExportWithSubtitles(c *gin.Context) {
 
 	job := h.queue.New()
 	exportPath := h.store.ExportPath(job.ID)
-	videoPath := h.store.VideoPath(req.VideoID)
+	videoPath := h.store.ResolveVideoPath(req.VideoID)
 
 	capturedFontsDir := fontsDir
 	h.queue.Submit(job, func() error {

@@ -59,7 +59,7 @@ func isNumericFormatID(format string) bool {
  * - Check file size
  * - Verify file is accessible
  */
-func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job, quality string) (*models.Video, error) {
+func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job, quality string, startTime float64, endTime float64) (*models.Video, error) {
 	job.Status = models.JobProcessing
 	job.Updates <- models.JobUpdate{
 		Status:   models.JobProcessing,
@@ -68,6 +68,13 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 	}
 
 	outputTemplate := filepath.Join(outDir, "%(id)s.%(ext)s")
+
+	// For partial downloads, append timestamp suffix to filename
+	var partialSuffix string
+	if endTime > startTime && startTime >= 0 {
+		partialSuffix = fmt.Sprintf("_%s%s", formatTimestamp(startTime), formatTimestamp(endTime))
+		outputTemplate = filepath.Join(outDir, "%(id)s"+partialSuffix+".%(ext)s")
+	}
 
 	log.Printf("[DEBUG] DownloadVideo: Requested quality: '%s'", quality)
 	formatString, err := s.GetFormatIDs(url, quality)
@@ -94,8 +101,17 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 		"--file-access-retries", "3",
 		"--retry-sleep", "1",
 		"-o", outputTemplate,
-		url,
 	}
+
+	// Partial download: only fetch the specified time range
+	if endTime > startTime && startTime >= 0 {
+		section := fmt.Sprintf("*%.2f-%.2f", startTime, endTime)
+		cmdArgs = append(cmdArgs, "--download-sections", section)
+		cmdArgs = append(cmdArgs, "--force-keyframes-at-cuts")
+		log.Printf("[DEBUG] DownloadVideo: Partial download section: %s", section)
+	}
+
+	cmdArgs = append(cmdArgs, url)
 
 	if useAndroidClient {
 		cmdArgs = append(cmdArgs, "--extractor-args", "youtube:player_client=android")
@@ -123,6 +139,13 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 	}
 
 	progressRegex := regexp.MustCompile(`\[download\]\s+(\d+\.?\d*)%\s+of\s+~?([\d.]+)([KMGT]?i?B)\s+(?:at\s+([\d.]+)([KMGT]?i?B/s))?\s*(?:ETA\s+([\d:]+))?`)
+	ffmpegProgressRegex := regexp.MustCompile(`(?i)size=\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?B)\s+time=\s*(\d{2}:\d{2}:\d{2}\.\d{2})`)
+
+	segmentDuration := endTime - startTime
+	if segmentDuration <= 0 {
+		segmentDuration = 0
+	}
+
 	scanner := bufio.NewScanner(stdout)
 	go func() {
 		for scanner.Scan() {
@@ -159,6 +182,8 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 					log.Printf("[DEBUG] DownloadVideo: Progress update: %.1f%%, Downloaded: %s, Total: %s, Speed: %s, ETA: %s",
 						progress, downloaded, totalSize, speed, eta)
 
+					job.Progress = int(progress)
+					job.Message = "Downloading..."
 					job.Updates <- models.JobUpdate{
 						Status:     models.JobProcessing,
 						Progress:   int(progress),
@@ -167,6 +192,36 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 						Total:      totalSize,
 						Speed:      speed,
 						ETA:        eta,
+					}
+				}
+			} else if segmentDuration > 0 {
+				if matches := ffmpegProgressRegex.FindStringSubmatch(line); len(matches) > 3 {
+					downloadedSize := matches[1] + matches[2]
+					timeStr := matches[3]
+
+					// Parse time 00:00:10.24 to seconds
+					parts := strings.Split(timeStr, ":")
+					if len(parts) == 3 {
+						h, _ := strconv.ParseFloat(parts[0], 64)
+						m, _ := strconv.ParseFloat(parts[1], 64)
+						s, _ := strconv.ParseFloat(parts[2], 64)
+						currentSeconds := h*3600 + m*60 + s
+
+						progress := (currentSeconds / segmentDuration) * 100
+						if progress > 100 {
+							progress = 100
+						}
+
+						log.Printf("[DEBUG] DownloadVideo: FFmpeg progress: %.1f%%, Time: %s, Size: %s", progress, timeStr, downloadedSize)
+
+						job.Progress = int(progress)
+						job.Message = "Clipping section..."
+						job.Updates <- models.JobUpdate{
+							Status:     models.JobProcessing,
+							Progress:   int(progress),
+							Message:    "Clipping section...",
+							Downloaded: downloadedSize,
+						}
 					}
 				}
 			}
@@ -215,6 +270,8 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 					log.Printf("[DEBUG] DownloadVideo: Progress update: %.1f%%, Downloaded: %s, Total: %s, Speed: %s, ETA: %s",
 						progress, downloaded, totalSize, speed, eta)
 
+					job.Progress = int(progress)
+					job.Message = "Downloading..."
 					job.Updates <- models.JobUpdate{
 						Status:     models.JobProcessing,
 						Progress:   int(progress),
@@ -223,6 +280,33 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 						Total:      totalSize,
 						Speed:      speed,
 						ETA:        eta,
+					}
+				}
+			} else if segmentDuration > 0 {
+				if matches := ffmpegProgressRegex.FindStringSubmatch(line); len(matches) > 3 {
+					downloadedSize := matches[1] + matches[2]
+					timeStr := matches[3]
+
+					parts := strings.Split(timeStr, ":")
+					if len(parts) == 3 {
+						h, _ := strconv.ParseFloat(parts[0], 64)
+						m, _ := strconv.ParseFloat(parts[1], 64)
+						s, _ := strconv.ParseFloat(parts[2], 64)
+						currentSeconds := h*3600 + m*60 + s
+
+						progress := (currentSeconds / segmentDuration) * 100
+						if progress > 100 {
+							progress = 100
+						}
+
+						job.Progress = int(progress)
+						job.Message = "Clipping section..."
+						job.Updates <- models.JobUpdate{
+							Status:     models.JobProcessing,
+							Progress:   int(progress),
+							Message:    "Clipping section...",
+							Downloaded: downloadedSize,
+						}
 					}
 				}
 			}
@@ -278,20 +362,51 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 		return nil, fmt.Errorf("failed to parse info.json: %w", err)
 	}
 
-	log.Printf("[DEBUG] DownloadVideo: Looking for video file: %s.mp4", info.ID)
-	videoFiles, err := filepath.Glob(filepath.Join(outDir, info.ID+".mp4"))
-	if err != nil {
-		log.Printf("[DEBUG] DownloadVideo: Error globbing video file: %v", err)
-		return nil, fmt.Errorf("failed to find downloaded video file: %w", err)
-	}
-	if len(videoFiles) == 0 {
-		log.Printf("[DEBUG] DownloadVideo: Video file not found. Looking for any .mp4 files...")
-		allMp4, _ := filepath.Glob(filepath.Join(outDir, "*.mp4"))
-		log.Printf("[DEBUG] DownloadVideo: Found %d mp4 files:", len(allMp4))
-		for _, f := range allMp4 {
-			log.Printf("[DEBUG] DownloadVideo:   - %s", f)
+	log.Printf("[DEBUG] DownloadVideo: Looking for video file: %s%s.mp4", info.ID, partialSuffix)
+
+	var videoFiles []string
+	specificPath := filepath.Join(outDir, info.ID+partialSuffix+".mp4")
+	if _, err := os.Stat(specificPath); err == nil {
+		videoFiles = []string{specificPath}
+	} else {
+		// Fallback: Search for the video file - with or without partial suffix
+		videoGlob := filepath.Join(outDir, info.ID+"*.mp4")
+		matches, err := filepath.Glob(videoGlob)
+		if err != nil {
+			log.Printf("[DEBUG] DownloadVideo: Error globbing video file: %v", err)
+			return nil, fmt.Errorf("failed to find downloaded video file: %w", err)
 		}
-		return nil, fmt.Errorf("failed to find downloaded video file %s.mp4 in %s", info.ID, outDir)
+
+		// Filter out .part files
+		var filteredFiles []string
+		for _, f := range matches {
+			if !strings.HasSuffix(f, ".part") {
+				filteredFiles = append(filteredFiles, f)
+			}
+		}
+
+		if len(filteredFiles) == 0 {
+			log.Printf("[DEBUG] DownloadVideo: Video file not found. Looking for any .mp4 files...")
+			allMp4, _ := filepath.Glob(filepath.Join(outDir, "*.mp4"))
+			log.Printf("[DEBUG] DownloadVideo: Found %d mp4 files:", len(allMp4))
+			for _, f := range allMp4 {
+				log.Printf("[DEBUG] DownloadVideo:   - %s", f)
+			}
+			return nil, fmt.Errorf("failed to find downloaded video file %s.mp4 in %s", info.ID, outDir)
+		}
+
+		// If multiple, pick the one that matches our partialSuffix if possible, otherwise first
+		foundMatch := false
+		for _, f := range filteredFiles {
+			if strings.Contains(f, partialSuffix) {
+				videoFiles = []string{f}
+				foundMatch = true
+				break
+			}
+		}
+		if !foundMatch {
+			videoFiles = []string{filteredFiles[0]}
+		}
 	}
 
 	fileInfo, err := os.Stat(videoFiles[0])
@@ -366,7 +481,7 @@ func (s *YtDlpService) GetVideoMetadata(url string) (*models.Video, error) {
  * - Sort qualities: 1080p, 720p, 480p, 360p, 240p, 144p
  * - Add worst if we have any qualities
  */
-func (s *YtDlpService) GetAvailableFormats(url string) ([]string, error) {
+func (s *YtDlpService) GetAvailableFormats(url string) ([]models.QualityInfo, error) {
 	log.Printf("[DEBUG] GetAvailableFormats: Fetching formats for URL: %s", url)
 
 	cmd := exec.Command("py", "-m", "yt_dlp",
@@ -391,9 +506,37 @@ func (s *YtDlpService) GetAvailableFormats(url string) ([]string, error) {
 	lines := strings.Split(outputStr, "\n")
 	log.Printf("[DEBUG] GetAvailableFormats: Parsing %d lines", len(lines))
 
-	qualityMap := make(map[string]bool)
+	qualityMap := make(map[string]models.QualityInfo)
+	var bestAudioSize int64
 
 	qualityLabels := []string{"1080p60", "1080p", "720p60", "720p", "480p", "360p", "240p", "144p"}
+	resolutionMap := map[string]string{
+		"1080p": "1920x1080",
+		"720p":  "1280x720",
+		"480p":  "854x480",
+		"360p":  "640x360",
+		"240p":  "426x240",
+		"144p":  "256x144",
+	}
+
+	// First pass: find best audio size
+	for _, line := range lines {
+		if strings.Contains(line, "audio only") && strings.Contains(line, "m4a") {
+			// Support both Unicode box drawing separator and standard pipe
+			fmtLine := strings.ReplaceAll(line, "│", "|")
+			parts := strings.Split(fmtLine, "|")
+			if len(parts) > 1 {
+				sizePart := strings.TrimSpace(parts[1])
+				sizeParts := strings.Fields(sizePart)
+				if len(sizeParts) > 0 {
+					size := parseSize(sizeParts[0])
+					if size > bestAudioSize {
+						bestAudioSize = size
+					}
+				}
+			}
+		}
+	}
 
 	for i, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
@@ -413,14 +556,47 @@ func (s *YtDlpService) GetAvailableFormats(url string) ([]string, error) {
 		formatID := formatIDMatch[1]
 
 		for _, quality := range qualityLabels {
+			normalizedQuality := quality
+			if strings.HasSuffix(quality, "60") {
+				normalizedQuality = strings.TrimSuffix(quality, "60")
+			}
+
 			qualityPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(quality) + `\b`)
-			if qualityPattern.MatchString(line) {
-				normalizedQuality := quality
-				if strings.HasSuffix(quality, "60") {
-					normalizedQuality = strings.TrimSuffix(quality, "60")
+			match := qualityPattern.MatchString(line)
+			if !match {
+				// Try resolution fallback
+				if res, ok := resolutionMap[normalizedQuality]; ok {
+					if strings.Contains(line, res) {
+						match = true
+					}
 				}
-				log.Printf("[DEBUG] GetAvailableFormats: Found format ID %s with quality %s (normalized to %s) (line %d): %s", formatID, quality, normalizedQuality, i, trimmedLine)
-				qualityMap[normalizedQuality] = true
+			}
+
+			if match {
+				// Extract size - support both separators
+				var totalSize int64
+				fmtLine := strings.ReplaceAll(line, "│", "|")
+				parts := strings.Split(fmtLine, "|")
+				if len(parts) > 1 {
+					sizePart := strings.TrimSpace(parts[1])
+					sizeFields := strings.Fields(sizePart)
+					if len(sizeFields) > 0 {
+						totalSize = parseSize(sizeFields[0])
+						if strings.Contains(line, "video only") {
+							totalSize += bestAudioSize
+						}
+					}
+				}
+
+				log.Printf("[DEBUG] GetAvailableFormats: Found format ID %s with quality %s (normalized to %s) (line %d): %s, Size: %d", formatID, quality, normalizedQuality, i, trimmedLine, totalSize)
+
+				if existing, ok := qualityMap[normalizedQuality]; !ok || (totalSize > 0 && existing.SizeInBytes < totalSize) {
+					qualityMap[normalizedQuality] = models.QualityInfo{
+						Label:       normalizedQuality,
+						Size:        formatSize(totalSize),
+						SizeInBytes: totalSize,
+					}
+				}
 				break
 			}
 		}
@@ -428,16 +604,16 @@ func (s *YtDlpService) GetAvailableFormats(url string) ([]string, error) {
 
 	log.Printf("[DEBUG] GetAvailableFormats: Found qualities: %v", qualityMap)
 
-	sortedQualities := []string{"best"}
+	sortedQualities := []models.QualityInfo{{Label: "best", Size: ""}}
 	qualityOrder := []string{"1080p", "720p", "480p", "360p", "240p", "144p"}
 	for _, q := range qualityOrder {
-		if qualityMap[q] {
-			sortedQualities = append(sortedQualities, q)
+		if info, ok := qualityMap[q]; ok {
+			sortedQualities = append(sortedQualities, info)
 		}
 	}
 
 	if len(sortedQualities) > 1 {
-		sortedQualities = append(sortedQualities, "worst")
+		sortedQualities = append(sortedQualities, models.QualityInfo{Label: "worst", Size: ""})
 	}
 
 	log.Printf("[DEBUG] GetAvailableFormats: Returning sorted qualities: %v", sortedQualities)
@@ -578,9 +754,14 @@ func parseSize(sizeStr string) int64 {
 
 	var numStr string
 	var unit string
+	foundNum := false
 	for i, r := range sizeStr {
 		if (r >= '0' && r <= '9') || r == '.' {
 			numStr += string(r)
+			foundNum = true
+		} else if !foundNum {
+			// Skip leading characters like ~
+			continue
 		} else {
 			unit = sizeStr[i:]
 			break
@@ -628,4 +809,13 @@ func formatSize(bytes int64) string {
 		return fmt.Sprintf("%.1f %s", float64(bytes)/float64(div), units[exp])
 	}
 	return fmt.Sprintf("%.1f PB", float64(bytes)/float64(div))
+}
+
+// formatTimestamp converts seconds to HHMMSS format (e.g., 41411 seconds -> "113011")
+func formatTimestamp(seconds float64) string {
+	totalSecs := int(seconds)
+	h := totalSecs / 3600
+	m := (totalSecs % 3600) / 60
+	s := totalSecs % 60
+	return fmt.Sprintf("%02d%02d%02d", h, m, s)
 }

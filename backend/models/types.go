@@ -83,3 +83,9 @@ type SubtitleExportRequest struct {
 	AssContent string  `json:"assContent"`
 	Label      string  `json:"label"`
 }
+
+type QualityInfo struct {
+	Label       string `json:"label"`
+	Size        string `json:"size"`
+	SizeInBytes int64  `json:"sizeInBytes"`
+}

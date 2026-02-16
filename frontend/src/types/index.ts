@@ -36,3 +36,9 @@ export interface TimelineBlock {
   offsetSeconds: number  // position on the timeline
   duration: number
 }
+
+export interface QualityInfo {
+  label: string
+  size: string
+  sizeInBytes: number
+}

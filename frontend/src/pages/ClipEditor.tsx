@@ -1,16 +1,18 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Plus, Settings, Download, ChevronDown, FolderOpen, Home } from 'lucide-react'
+import { Plus, Settings, Download, ChevronDown, FolderOpen, Home, ArrowLeft, FileDown, Edit, X } from 'lucide-react'
 import { useSessionStore } from '../store/sessionStore'
 import { useVideoMetadata } from '../hooks/useVideoMetadata'
 import { useJobProgress } from '../hooks/useJobProgress'
-import { getVideoFileUrl, createClip, submitVideoUrl, getAvailableQualities, openVideoFolder } from '../api/client'
+import { getVideoFileUrl, createClip, submitVideoUrl, getAvailableQualities, openVideoFolder, downloadPartial, submitExport, submitExportIndividual, getDownloadUrl, getClipDownloadUrl } from '../api/client'
 import { VideoPlayer } from '../components/VideoPlayer'
 import { TrimBar } from '../components/TrimBar'
 import { ClipTray } from '../components/ClipTray'
 import { ClipPreview } from '../components/ClipPreview'
 import { Modal } from '../components/Modal'
+import { ProgressBar } from '../components/ProgressBar'
 import { formatTime, parseTime } from '../types/subtitle'
+import { QualityInfo } from '../types'
 import '../styles/main.css'
 
 /**
@@ -71,7 +73,14 @@ export function ClipEditor() {
   const [isAddingVideo, setIsAddingVideo] = useState(false)
   const [newVideoUrl, setNewVideoUrl] = useState('')
   const [newVideoQuality, setNewVideoQuality] = useState('best')
-  const [availableQualities, setAvailableQualities] = useState<string[]>(['best', '1080p', '720p', '480p', '360p', 'worst'])
+  const [availableQualities, setAvailableQualities] = useState<QualityInfo[]>([
+    { label: 'best', size: '', sizeInBytes: 0 },
+    { label: '1080p', size: '', sizeInBytes: 0 },
+    { label: '720p', size: '', sizeInBytes: 0 },
+    { label: '480p', size: '', sizeInBytes: 0 },
+    { label: '360p', size: '', sizeInBytes: 0 },
+    { label: 'worst', size: '', sizeInBytes: 0 }
+  ])
   const [isLoadingQualities, setIsLoadingQualities] = useState(false)
   const [processingClips, setProcessingClips] = useState<Set<string>>(new Set())
   const [isVideoReady, setIsVideoReady] = useState(false)
@@ -83,6 +92,21 @@ export function ClipEditor() {
   const [startInput, setStartInput] = useState('')
   const [endInput, setEndInput] = useState('')
   const [isFileMenuOpen, setIsFileMenuOpen] = useState(false)
+  const [isRemote, setIsRemote] = useState(false)
+  const [isDownloading, setIsDownloading] = useState(false)
+  const [partialJobId, setPartialJobId] = useState<string | null>(null)
+  const ytPlayerRef = useRef<HTMLIFrameElement>(null)
+  const { status: partialStatus, progress: partialProgress } = useJobProgress(partialJobId)
+  const isPartialClipMode = !!(sessionStorage.getItem('importMode') === 'clip' && sessionStorage.getItem('videoUrl'))
+  const [downloadedClipTimes, setDownloadedClipTimes] = useState<{ start: number; end: number } | null>(null)
+
+  const [showDecisionModal, setShowDecisionModal] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
+  const [isExportingIndividual, setIsExportingIndividual] = useState(false)
+  const [individualJobId, setIndividualJobId] = useState<string | null>(null)
+  const { exportJobId, setExportJobId } = useSessionStore()
+  const { progress: exportProgress, status: exportStatus, message: exportMessage, error: exportError } = useJobProgress(exportJobId)
+  const { progress: individualProgress, status: individualStatus, message: individualMessage, error: individualError } = useJobProgress(individualJobId)
 
   useEffect(() => {
     setStartInput(formatTime(startTime))
@@ -181,17 +205,52 @@ export function ClipEditor() {
     hasRestoredClipRef.current = false
   }, [videoId])
 
+  // When a partial download completes in clip mode, auto-add clip and reset for next selection
+  useEffect(() => {
+    if (partialStatus === 'done' && isPartialClipMode && downloadedClipTimes && videoId) {
+      const clip = {
+        id: `clip-${Date.now()}`,
+        videoId,
+        start: downloadedClipTimes.start,
+        end: downloadedClipTimes.end,
+        label: `Clip ${clips.length + 1}`,
+      }
+      addClip(clip)
+      setDownloadedClipTimes(null)
+      setIsDownloading(false)
+      setPartialJobId(null)
+    }
+  }, [partialStatus, isPartialClipMode, downloadedClipTimes, videoId])
+
+  // Check if the video file exists on disk; if not, it's remote (YouTube preview mode)
   useEffect(() => {
     if (!videoId) {
       setIsVideoReady(false)
+      setIsRemote(false)
       return
     }
 
     setIsVideoReady(false)
 
     const checkVideoReady = async () => {
+      // In partial clip mode, partial download completion doesn't change the UI mode
+      if (partialStatus === 'done' && isPartialClipMode) {
+        // Stay in clip mode - don't transition to local player
+        return
+      }
+
+      // Non-clip-mode: partial download transitions to local player
+      if (partialStatus === 'done' && !isPartialClipMode) {
+        setIsVideoReady(true)
+        setIsRemote(false)
+        setIsDownloading(false)
+        setPartialJobId(null)
+        return
+      }
+
       if (downloadJobId && downloadStatus === 'done') {
         setIsVideoReady(true)
+        setIsRemote(false)
         return
       }
 
@@ -202,16 +261,29 @@ export function ClipEditor() {
 
       try {
         const response = await fetch(getVideoFileUrl(videoId), { method: 'HEAD' })
-        setIsVideoReady(response.ok)
+        if (response.ok) {
+          // In partial clip mode, local file existing doesn't change the UI mode
+          if (isPartialClipMode) {
+            setIsVideoReady(true)
+            // Keep isRemote as-is so the YouTube iframe stays visible
+          } else {
+            setIsVideoReady(true)
+            setIsRemote(false)
+          }
+        } else {
+          setIsVideoReady(false)
+          setIsRemote(true)
+        }
       } catch (err) {
         setIsVideoReady(false)
+        setIsRemote(true)
       }
     }
 
     checkVideoReady()
     const interval = setInterval(checkVideoReady, 2000)
     return () => clearInterval(interval)
-  }, [videoId, downloadJobId, downloadStatus])
+  }, [videoId, downloadJobId, downloadStatus, partialStatus, isPartialClipMode])
 
   const handleViewClip = (clip: { videoId: string; start: number; end: number }) => {
     if (clip.videoId !== videoId) {
@@ -313,12 +385,56 @@ export function ClipEditor() {
       setIsAddingVideo(false)
       setNewVideoUrl('')
       setNewVideoQuality('best')
-      setAvailableQualities(['best', '1080p', '720p', '480p', '360p', 'worst'])
+      setAvailableQualities([
+        { label: 'best', size: '', sizeInBytes: 0 },
+        { label: '1080p', size: '', sizeInBytes: 0 },
+        { label: '720p', size: '', sizeInBytes: 0 },
+        { label: '480p', size: '', sizeInBytes: 0 },
+        { label: '360p', size: '', sizeInBytes: 0 },
+        { label: 'worst', size: '', sizeInBytes: 0 }
+      ])
 
       navigate(`/editor/${newVideoId}`, { replace: false })
     } catch (err) {
       console.error('Failed to add video:', err)
       alert(err instanceof Error ? err.message : 'Failed to add video')
+    }
+  }
+
+  const handleExportNow = async () => {
+    if (clips.length === 0) return
+    setIsExporting(true)
+    try {
+      const { jobId } = await submitExport(clips)
+      setExportJobId(jobId)
+    } catch (err) {
+      console.error('Failed to export:', err)
+      setIsExporting(false)
+    }
+  }
+
+  const handleExportIndividual = async () => {
+    if (clips.length === 0) return
+    setIsExportingIndividual(true)
+    try {
+      const { jobId } = await submitExportIndividual(clips)
+      setIndividualJobId(jobId)
+    } catch (err) {
+      console.error('Failed to export individually:', err)
+      setIsExportingIndividual(false)
+    }
+  }
+
+  const handleDownloadAllClips = async () => {
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i]
+      const link = document.createElement('a')
+      link.href = getClipDownloadUrl(clip.id)
+      link.download = `${clip.label || `clip-${clip.id}`}.mp4`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      if (i < clips.length - 1) await new Promise(resolve => setTimeout(resolve, 500))
     }
   }
 
@@ -336,7 +452,8 @@ export function ClipEditor() {
         getAvailableQualities(newUrl)
           .then((qualities) => {
             setAvailableQualities(qualities)
-            if (!qualities.includes(newVideoQuality)) {
+            const labels = qualities.map(q => q.label)
+            if (!labels.includes(newVideoQuality)) {
               setNewVideoQuality('best')
             }
           })
@@ -370,6 +487,27 @@ export function ClipEditor() {
   }
 
   const videoSrc = getVideoFileUrl(videoId!)
+  const youtubeUrl = sessionStorage.getItem('videoUrl') || ''
+  const storedQuality = sessionStorage.getItem('videoQuality') || 'best'
+
+  const handleDownloadSelection = useCallback(async () => {
+    if (!videoId || !youtubeUrl) return
+    setIsDownloading(true)
+    setDownloadedClipTimes({ start: startTime, end: endTime })
+    try {
+      const { jobId } = await downloadPartial(videoId, youtubeUrl, storedQuality, startTime, endTime)
+      if (jobId) {
+        setPartialJobId(jobId)
+        const { setVideoJobId } = useSessionStore.getState()
+        setVideoJobId(videoId, jobId)
+      }
+    } catch (err) {
+      console.error('Failed to start partial download:', err)
+      alert(err instanceof Error ? err.message : 'Failed to download')
+      setIsDownloading(false)
+      setDownloadedClipTimes(null)
+    }
+  }, [videoId, youtubeUrl, storedQuality, startTime, endTime])
 
   return (
     <div className="main-container">
@@ -466,7 +604,7 @@ export function ClipEditor() {
         </div>
         <div style={{ flex: 1 }} />
         {clips.length > 0 && (
-          <button className="main-tbtn main-tbtn-primary" onClick={() => navigate('/decision')}>
+          <button className="main-tbtn main-tbtn-primary" onClick={() => setShowDecisionModal(true)}>
             <Download size={14} /> Export Options
           </button>
         )}
@@ -475,16 +613,41 @@ export function ClipEditor() {
       <div className="main-top-panel" style={{ height: 'calc(100vh - 120px)' }}>
         <div className="main-video-panel" style={{ minWidth: '800px' }}>
           <div className="main-video-container" style={{ position: 'relative' }}>
-            {isVideoReady ? (
+            {isPartialClipMode ? (
+              <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000' }}>
+                <iframe
+                  ref={ytPlayerRef}
+                  src={`https://www.youtube.com/embed/${videoId}?enablejsapi=1&start=${Math.floor(currentTime)}`}
+                  style={{ width: '100%', height: '100%', border: 'none' }}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            ) : isVideoReady ? (
               <VideoPlayer
                 src={videoSrc}
                 currentTime={currentTime}
                 onTimeUpdate={setCurrentTime}
               />
+            ) : isRemote && !isDownloading ? (
+              <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000' }}>
+                <iframe
+                  ref={ytPlayerRef}
+                  src={`https://www.youtube.com/embed/${videoId}?enablejsapi=1&start=${Math.floor(currentTime)}`}
+                  style={{ width: '100%', height: '100%', border: 'none' }}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 16 }}>
                 <div style={{ width: 40, height: 40, border: '3px solid #313244', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
-                <span style={{ fontSize: 13, color: '#a6adc8' }}>{downloadMessage || 'Loading stream...'} ({downloadProgress}%)</span>
+                <span style={{ fontSize: 13, color: '#a6adc8' }}>
+                  {isDownloading
+                    ? `Downloading selection... ${partialProgress}%`
+                    : `${downloadMessage || 'Loading stream...'} (${downloadProgress}%)`
+                  }
+                </span>
               </div>
             )}
 
@@ -547,21 +710,55 @@ export function ClipEditor() {
           <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
             {isClipPreviewOpen ? (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                <div className="main-section-title">Clip Boundary Preview</div>
+                <div className="main-section-title">{isPartialClipMode || (isRemote && !isVideoReady) ? 'Selection Preview' : 'Clip Boundary Preview'}</div>
                 <div style={{ flex: 1, background: '#000', borderRadius: 4, overflow: 'hidden', marginBottom: 12, display: 'flex', flexDirection: 'column', minHeight: '240px' }}>
-                  {isVideoReady ? (
+                  {isPartialClipMode ? (
+                    <iframe
+                      src={`https://www.youtube.com/embed/${videoId}?start=${Math.floor(startTime)}&end=${Math.ceil(endTime)}&rel=0`}
+                      style={{ width: '100%', height: '100%', border: 'none' }}
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  ) : isVideoReady ? (
                     <ClipPreview src={videoSrc} startTime={startTime} endTime={endTime} />
+                  ) : isRemote ? (
+                    <iframe
+                      src={`https://www.youtube.com/embed/${videoId}?start=${Math.floor(startTime)}&end=${Math.ceil(endTime)}&rel=0`}
+                      style={{ width: '100%', height: '100%', border: 'none' }}
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
                   ) : (
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#585b70', fontSize: 12 }}>Preview Unavailable</div>
                   )}
                 </div>
-                <button
-                  onClick={handleAddClip}
-                  className="main-tbtn main-tbtn-primary"
-                  style={{ width: '100%', height: 40, fontSize: 14, fontWeight: 600 }}
-                >
-                  <Plus size={16} /> Add to Timeline
-                </button>
+                {isPartialClipMode ? (
+                  <button
+                    onClick={handleDownloadSelection}
+                    className="main-tbtn main-tbtn-primary"
+                    style={{ width: '100%', height: 40, fontSize: 14, fontWeight: 600 }}
+                    disabled={isDownloading}
+                  >
+                    <Download size={16} /> {isDownloading ? `Downloading... ${partialProgress}%` : 'Download Selection'}
+                  </button>
+                ) : (isRemote && !isVideoReady) ? (
+                  <button
+                    onClick={handleDownloadSelection}
+                    className="main-tbtn main-tbtn-primary"
+                    style={{ width: '100%', height: 40, fontSize: 14, fontWeight: 600 }}
+                    disabled={isDownloading}
+                  >
+                    <Download size={16} /> {isDownloading ? `Downloading... ${partialProgress}%` : 'Download Selection'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleAddClip}
+                    className="main-tbtn main-tbtn-primary"
+                    style={{ width: '100%', height: 40, fontSize: 14, fontWeight: 600 }}
+                  >
+                    <Plus size={16} /> Add to Timeline
+                  </button>
+                )}
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -617,7 +814,10 @@ export function ClipEditor() {
                 <option value="best">Detecting...</option>
               ) : (
                 availableQualities.map((q) => (
-                  <option key={q} value={q}>{q}</option>
+                  <option key={q.label} value={q.label}>
+                    {q.label}
+                    {q.size ? ` (${q.size})` : ''}
+                  </option>
                 ))
               )}
             </select>
@@ -629,6 +829,89 @@ export function ClipEditor() {
           >
             Load Stream
           </button>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showDecisionModal}
+        onClose={() => {
+          setShowDecisionModal(false)
+          setIsExporting(false)
+          setIsExportingIndividual(false)
+          setExportJobId(null)
+          setIndividualJobId(null)
+        }}
+        title={isExporting || isExportingIndividual ? "Exporting Clips" : "Export Options"}
+      >
+        <div style={{ padding: 4 }}>
+          {isExporting || isExportingIndividual ? (
+            <div className="space-y-4">
+              <div>
+                <div className="flex justify-between text-xs text-gray-400 mb-2">
+                  <span>{(isExporting ? exportMessage : individualMessage) || 'Processing...'}</span>
+                  <span className="font-semibold">{isExporting ? exportProgress : individualProgress}%</span>
+                </div>
+                <ProgressBar progress={isExporting ? exportProgress : individualProgress} />
+              </div>
+
+              {(isExporting ? exportError : individualError) && (
+                <div className="bg-red-500/20 border border-red-500 text-red-400 px-3 py-2 rounded-lg text-xs">
+                  {isExporting ? exportError : individualError}
+                </div>
+              )}
+
+              {(isExporting ? exportStatus : individualStatus) === 'done' && (
+                <button
+                  onClick={isExporting ? () => window.location.href = getDownloadUrl(exportJobId!) : handleDownloadAllClips}
+                  className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors flex items-center justify-center gap-2 text-sm font-semibold"
+                >
+                  <Download size={16} />
+                  {isExporting ? 'Download Merged Video' : 'Download All Clips'}
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <button
+                onClick={handleExportNow}
+                className="w-full p-4 bg-[#11111b] border border-[#313244] rounded-lg hover:border-[#89b4fa] transition-all text-left group"
+              >
+                <div className="flex items-center gap-3 mb-1">
+                  <div className="p-2 bg-blue-500/10 rounded-lg text-blue-400 group-hover:bg-blue-500/20">
+                    <Download size={18} />
+                  </div>
+                  <span className="font-semibold text-white">Merge All Clips</span>
+                </div>
+                <p className="text-xs text-[#a6adc8] ml-11">Combine all extracted clips into a single MP4 file.</p>
+              </button>
+
+              <button
+                onClick={handleExportIndividual}
+                className="w-full p-4 bg-[#11111b] border border-[#313244] rounded-lg hover:border-[#a6e3a1] transition-all text-left group"
+              >
+                <div className="flex items-center gap-3 mb-1">
+                  <div className="p-2 bg-green-500/10 rounded-lg text-green-400 group-hover:bg-green-500/20">
+                    <FileDown size={18} />
+                  </div>
+                  <span className="font-semibold text-white">Batch Export</span>
+                </div>
+                <p className="text-xs text-[#a6adc8] ml-11">Download each clip as an individual video file.</p>
+              </button>
+
+              <button
+                onClick={() => navigate('/translate')}
+                className="w-full p-4 bg-[#11111b] border border-[#313244] rounded-lg hover:border-[#f9e2af] transition-all text-left group"
+              >
+                <div className="flex items-center gap-3 mb-1">
+                  <div className="p-2 bg-yellow-500/10 rounded-lg text-yellow-400 group-hover:bg-yellow-500/20">
+                    <Edit size={18} />
+                  </div>
+                  <span className="font-semibold text-white">Edit & Translate</span>
+                </div>
+                <p className="text-xs text-[#a6adc8] ml-11">Open the advanced editor to add subtitles and animations.</p>
+              </button>
+            </div>
+          )}
         </div>
       </Modal>
     </div>

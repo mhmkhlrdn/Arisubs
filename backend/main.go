@@ -66,6 +66,7 @@ func main() {
 		api.HEAD("/video/:id/file", videoHandler.ServeVideoFile)
 		api.GET("/video/qualities", videoHandler.GetAvailableQualities)
 		api.POST("/video/:id/open-folder", videoHandler.OpenVideoFolder)
+		api.POST("/video/:id/download", videoHandler.DownloadPartial)
 
 		api.POST("/clip", clipHandler.CreateClip)
 
