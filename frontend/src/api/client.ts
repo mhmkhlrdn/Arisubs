@@ -121,10 +121,10 @@ export async function openVideoFolder(videoId: string): Promise<void> {
   await fetchJSON(`${API_BASE}/video/${videoId}/open-folder`, { method: 'POST' })
 }
 
-export async function downloadPartial(videoId: string, url: string, quality: string, start: number, end: number): Promise<{ jobId: string, videoId: string }> {
+export async function downloadPartial(videoId: string, url: string, quality: string, start: number, end: number, isLive?: boolean): Promise<{ jobId: string, videoId: string }> {
   return fetchJSON<{ jobId: string, videoId: string }>(`${API_BASE}/video/${videoId}/download`, {
     method: 'POST',
-    body: JSON.stringify({ url, quality, start, end }),
+    body: JSON.stringify({ url, quality, start, end, isLive: isLive || false }),
   })
 }
 

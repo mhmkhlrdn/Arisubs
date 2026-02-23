@@ -18,6 +18,7 @@ export interface Video {
   duration: number     // seconds
   thumbnail: string
   filePath?: string
+  isLive?: boolean
 }
 
 export interface Clip {

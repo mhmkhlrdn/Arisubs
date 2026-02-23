@@ -25,6 +25,7 @@ type ytDlpInfo struct {
 	Title     string  `json:"title"`
 	Duration  float64 `json:"duration"`
 	Thumbnail string  `json:"thumbnail"`
+	IsLive    bool    `json:"is_live"`
 }
 
 type VideoQuality struct {
@@ -40,6 +41,37 @@ func isNumericFormatID(format string) bool {
 		}
 	}
 	return len(format) > 0
+}
+
+// scanLinesOrCR is a custom split function for bufio.Scanner that splits on
+// \n, \r\n, or bare \r. This is needed because ffmpeg outputs progress updates
+// using \r (carriage return) to overwrite the current line, and the default
+// bufio.ScanLines only splits on \n.
+func scanLinesOrCR(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\n' {
+			return i + 1, data[0:i], nil
+		}
+		if data[i] == '\r' {
+			if i+1 < len(data) {
+				if data[i+1] == '\n' {
+					return i + 2, data[0:i], nil
+				}
+				return i + 1, data[0:i], nil
+			}
+			if atEOF {
+				return len(data), data[0:i], nil
+			}
+			return 0, nil, nil
+		}
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 /*
@@ -59,7 +91,7 @@ func isNumericFormatID(format string) bool {
  * - Check file size
  * - Verify file is accessible
  */
-func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job, quality string, startTime float64, endTime float64) (*models.Video, error) {
+func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job, quality string, startTime float64, endTime float64, isLive bool) (*models.Video, error) {
 	job.Status = models.JobProcessing
 	job.Updates <- models.JobUpdate{
 		Status:   models.JobProcessing,
@@ -104,11 +136,20 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 	}
 
 	// Partial download: only fetch the specified time range
+	// Note: We intentionally omit --force-keyframes-at-cuts to allow stream copy
+	// instead of re-encoding. This is dramatically faster (seconds vs minutes)
+	// but cut points may be slightly imprecise (to nearest keyframe).
 	if endTime > startTime && startTime >= 0 {
 		section := fmt.Sprintf("*%.2f-%.2f", startTime, endTime)
 		cmdArgs = append(cmdArgs, "--download-sections", section)
-		cmdArgs = append(cmdArgs, "--force-keyframes-at-cuts")
 		log.Printf("[DEBUG] DownloadVideo: Partial download section: %s", section)
+
+		// For live streams, --live-from-start makes timestamps relative to
+		// the actual stream start instead of the current live edge
+		if isLive {
+			cmdArgs = append(cmdArgs, "--live-from-start")
+			log.Printf("[DEBUG] DownloadVideo: Live stream detected, using --live-from-start")
+		}
 	}
 
 	cmdArgs = append(cmdArgs, url)
@@ -234,6 +275,7 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 	stderrData := strings.Builder{}
 	go func() {
 		scanner := bufio.NewScanner(stderr)
+		scanner.Split(scanLinesOrCR)
 		for scanner.Scan() {
 			line := scanner.Text()
 			log.Printf("[DEBUG] DownloadVideo stderr: %s", line)
@@ -469,6 +511,7 @@ func (s *YtDlpService) GetVideoMetadata(url string) (*models.Video, error) {
 		Title:     info.Title,
 		Duration:  info.Duration,
 		Thumbnail: info.Thumbnail,
+		IsLive:    info.IsLive,
 	}, nil
 }
 

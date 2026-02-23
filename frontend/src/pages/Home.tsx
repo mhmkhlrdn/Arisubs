@@ -25,14 +25,12 @@ import '../styles/main.css'
 
 export function Home() {
   const [url, setUrl] = useState('')
-  const [quality, setQuality] = useState('best')
+  const [quality, setQuality] = useState('1080p')
   const [availableQualities, setAvailableQualities] = useState<QualityInfo[]>([
-    { label: 'best', size: '', sizeInBytes: 0 },
     { label: '1080p', size: '', sizeInBytes: 0 },
     { label: '720p', size: '', sizeInBytes: 0 },
     { label: '480p', size: '', sizeInBytes: 0 },
     { label: '360p', size: '', sizeInBytes: 0 },
-    { label: 'worst', size: '', sizeInBytes: 0 }
   ])
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -59,10 +57,11 @@ export function Home() {
       setIsLoadingQualities(true)
       getAvailableQualities(url)
         .then((qualities) => {
-          setAvailableQualities(qualities)
-          const labels = qualities.map(q => q.label)
+          const filtered = qualities.filter(q => q.label !== 'best' && q.label !== 'worst')
+          setAvailableQualities(filtered)
+          const labels = filtered.map(q => q.label)
           if (!labels.includes(quality)) {
-            setQuality('best')
+            setQuality(filtered[0]?.label || '1080p')
           }
         })
         .catch((err) => {
@@ -101,10 +100,17 @@ export function Home() {
         setVideoJobId(videoId, jobId)
       }
 
-      // Store URL, quality, and mode in sessionStorage so ClipEditor can use them
+      // Force clip mode for live streams (can't download full live stream)
+      const effectiveMode = video?.isLive ? 'clip' : importMode
+
       sessionStorage.setItem('videoUrl', url)
       sessionStorage.setItem('videoQuality', quality)
-      sessionStorage.setItem('importMode', importMode)
+      sessionStorage.setItem('importMode', effectiveMode)
+      if (video?.isLive) {
+        sessionStorage.setItem('isLive', 'true')
+      } else {
+        sessionStorage.removeItem('isLive')
+      }
 
       navigate(`/editor/${videoId}`)
     } catch (err) {
@@ -300,7 +306,7 @@ export function Home() {
                     ) : (
                       availableQualities.map((q) => (
                         <option key={q.label} value={q.label}>
-                          {q.label === 'best' ? 'Best Quality' : q.label === 'worst' ? 'Efficiency Mode' : q.label}
+                          {q.label}
                           {q.size ? ` (${q.size})` : ''}
                         </option>
                       ))

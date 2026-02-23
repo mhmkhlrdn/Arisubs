@@ -57,6 +57,7 @@ type Video struct {
 	Duration  float64 `json:"duration"`
 	FilePath  string  `json:"filePath"`
 	Thumbnail string  `json:"thumbnail"`
+	IsLive    bool    `json:"isLive,omitempty"`
 }
 
 /*

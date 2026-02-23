@@ -48,6 +48,7 @@ type DownloadPartialRequest struct {
 	Quality string  `json:"quality,omitempty"`
 	Start   float64 `json:"start"`
 	End     float64 `json:"end"`
+	IsLive  bool    `json:"isLive,omitempty"`
 }
 
 type VideoResponse struct {
@@ -99,6 +100,16 @@ func (h *VideoHandler) SubmitVideo(c *gin.Context) {
 		return
 	}
 
+	// Check if metadata exists (e.g., from a previous metadata-only request)
+	if existingMeta, err := h.store.LoadVideoMeta(videoID); err == nil && req.MetadataOnly {
+		c.JSON(http.StatusOK, VideoResponse{
+			JobID:   "",
+			VideoID: videoID,
+			Video:   existingMeta,
+		})
+		return
+	}
+
 	var videoMeta *models.Video
 	videoMeta, err := h.ytdlp.GetVideoMetadata(req.URL)
 	if err != nil {
@@ -129,7 +140,7 @@ func (h *VideoHandler) SubmitVideo(c *gin.Context) {
 	}
 
 	downloadTask := func() error {
-		video, err := h.ytdlp.DownloadVideo(req.URL, h.store.VideosDir(), job, quality, 0, 0)
+		video, err := h.ytdlp.DownloadVideo(req.URL, h.store.VideosDir(), job, quality, 0, 0, false)
 		if err != nil {
 			job.Status = models.JobError
 			job.Error = err.Error()
@@ -204,7 +215,7 @@ func (h *VideoHandler) DownloadPartial(c *gin.Context) {
 	job := h.queue.New()
 
 	downloadTask := func() error {
-		video, err := h.ytdlp.DownloadVideo(req.URL, h.store.VideosDir(), job, quality, req.Start, req.End)
+		video, err := h.ytdlp.DownloadVideo(req.URL, h.store.VideosDir(), job, quality, req.Start, req.End, req.IsLive)
 		if err != nil {
 			job.Status = models.JobError
 			job.Error = err.Error()
@@ -274,20 +285,25 @@ func extractVideoID(url string) string {
 
 func (h *VideoHandler) GetVideo(c *gin.Context) {
 	videoID := c.Param("id")
-	if !h.store.VideoExists(videoID) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Video not found"})
+
+	// First try to load saved metadata (available even for remote/metadata-only videos)
+	video, err := h.store.LoadVideoMeta(videoID)
+	if err == nil {
+		c.JSON(http.StatusOK, video)
 		return
 	}
 
-	video, err := h.store.LoadVideoMeta(videoID)
-	if err != nil {
+	// Fallback: check if video file exists and construct minimal metadata
+	if h.store.VideoExists(videoID) {
 		video = &models.Video{
 			ID:       videoID,
 			FilePath: h.store.ResolveVideoPath(videoID),
 		}
+		c.JSON(http.StatusOK, video)
+		return
 	}
 
-	c.JSON(http.StatusOK, video)
+	c.JSON(http.StatusNotFound, gin.H{"error": "Video not found"})
 }
 
 /*

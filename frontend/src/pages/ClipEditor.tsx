@@ -116,9 +116,17 @@ export function ClipEditor() {
     setEndInput(formatTime(endTime))
   }, [endTime])
 
+  // Auto-extend end time when start crosses past end
+  useEffect(() => {
+    if (startTime >= endTime) {
+      const maxDuration = activeVideo?.duration || Infinity
+      setEndTime(Math.min(startTime + 360, maxDuration))
+    }
+  }, [startTime, endTime])
+
   const handleStartBlur = () => {
     const time = parseTime(startInput)
-    if (!isNaN(time) && time >= 0 && time < endTime) {
+    if (!isNaN(time) && time >= 0 && time <= (activeVideo?.duration || Infinity)) {
       setStartTime(time)
     } else {
       setStartInput(formatTime(startTime))
@@ -138,6 +146,7 @@ export function ClipEditor() {
   const { status: downloadStatus, progress: downloadProgress, message: downloadMessage } = useJobProgress(downloadJobId)
 
   const activeVideo = videoId ? videos[videoId] || video : null
+  const isLive = !!(activeVideo?.isLive || sessionStorage.getItem('isLive') === 'true')
 
   useEffect(() => {
     const storedClip = sessionStorage.getItem('viewingClip')
@@ -195,7 +204,10 @@ export function ClipEditor() {
 
     if (!clipToRestore) {
       setStartTime(0)
-      setEndTime(Math.min(30, video.duration))
+      // For live streams, duration might be 0 or very large (elapsed time)
+      // Use a reasonable default window if duration is 0/missing
+      const effectiveDuration = video.duration > 0 ? video.duration : 86400
+      setEndTime(Math.min(30, effectiveDuration))
       setCurrentTime(0)
       hasRestoredClipRef.current = true
     }
@@ -259,6 +271,17 @@ export function ClipEditor() {
         return
       }
 
+      // If there's an active download job still processing, don't poll the file endpoint
+      // The job progress system (SSE) will handle the state transition when it completes
+      if (downloadJobId && downloadStatus && downloadStatus !== 'done') {
+        return
+      }
+
+      // Same for partial downloads — rely on partialStatus SSE tracking
+      if (isDownloading && partialJobId && partialStatus && partialStatus !== 'done') {
+        return
+      }
+
       try {
         const response = await fetch(getVideoFileUrl(videoId), { method: 'HEAD' })
         if (response.ok) {
@@ -283,7 +306,7 @@ export function ClipEditor() {
     checkVideoReady()
     const interval = setInterval(checkVideoReady, 2000)
     return () => clearInterval(interval)
-  }, [videoId, downloadJobId, downloadStatus, partialStatus, isPartialClipMode])
+  }, [videoId, downloadJobId, downloadStatus, partialStatus, isPartialClipMode, isDownloading, partialJobId])
 
   const handleViewClip = (clip: { videoId: string; start: number; end: number }) => {
     if (clip.videoId !== videoId) {
@@ -495,7 +518,7 @@ export function ClipEditor() {
     setIsDownloading(true)
     setDownloadedClipTimes({ start: startTime, end: endTime })
     try {
-      const { jobId } = await downloadPartial(videoId, youtubeUrl, storedQuality, startTime, endTime)
+      const { jobId } = await downloadPartial(videoId, youtubeUrl, storedQuality, startTime, endTime, isLive)
       if (jobId) {
         setPartialJobId(jobId)
         const { setVideoJobId } = useSessionStore.getState()
@@ -507,7 +530,7 @@ export function ClipEditor() {
       setIsDownloading(false)
       setDownloadedClipTimes(null)
     }
-  }, [videoId, youtubeUrl, storedQuality, startTime, endTime])
+  }, [videoId, youtubeUrl, storedQuality, startTime, endTime, isLive])
 
   return (
     <div className="main-container">
@@ -651,7 +674,10 @@ export function ClipEditor() {
               </div>
             )}
 
-            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, padding: '8px 12px', background: 'linear-gradient(to bottom, rgba(0,0,0,0.8), transparent)', fontSize: 13, fontWeight: 600, color: '#fff', pointerEvents: 'none' }}>
+            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, padding: '8px 12px', background: 'linear-gradient(to bottom, rgba(0,0,0,0.8), transparent)', fontSize: 13, fontWeight: 600, color: '#fff', pointerEvents: 'none', display: 'flex', alignItems: 'center', gap: 8 }}>
+              {isLive && (
+                <span style={{ background: '#e64553', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700, letterSpacing: '0.5px' }}>LIVE</span>
+              )}
               {activeVideo.title}
             </div>
           </div>
@@ -659,18 +685,21 @@ export function ClipEditor() {
           <div className="main-video-controls" style={{ padding: '8px', borderBottom: '1px solid #313244' }}>
             <span className="main-video-time">{formatTime(currentTime)}</span>
             <div style={{ flex: 1, margin: '0 12px' }}>
-              {activeVideo.duration > 0 && (
-                <TrimBar
-                  duration={activeVideo.duration}
-                  start={startTime}
-                  end={endTime}
-                  onStartChange={setStartTime}
-                  onEndChange={setEndTime}
-                  onSeek={setCurrentTime}
-                />
-              )}
+              {(() => {
+                const effectiveDuration = activeVideo.duration > 0 ? activeVideo.duration : (isLive ? 86400 : 0)
+                return effectiveDuration > 0 ? (
+                  <TrimBar
+                    duration={effectiveDuration}
+                    start={startTime}
+                    end={endTime}
+                    onStartChange={setStartTime}
+                    onEndChange={setEndTime}
+                    onSeek={setCurrentTime}
+                  />
+                ) : null
+              })()}
             </div>
-            <span className="main-video-time">{formatTime(activeVideo.duration)}</span>
+            <span className="main-video-time">{isLive && activeVideo.duration <= 0 ? 'LIVE' : formatTime(activeVideo.duration)}</span>
           </div>
 
           <div className="main-audio-toolbar" style={{ height: 32, justifyContent: 'center', gap: 16 }}>

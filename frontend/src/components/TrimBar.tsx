@@ -49,7 +49,7 @@ export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSe
     if (type === 'scrub') {
       const time = getTimeFromX(e.clientX)
       if (e.button === 0) {
-        onStartChange(Math.max(0, Math.min(time, end - 0.1)))
+        onStartChange(Math.max(0, Math.min(time, duration)))
         setIsDragging('start')
       } else if (e.button === 2) {
         onEndChange(Math.min(duration, Math.max(time, start + 0.1)))
@@ -68,7 +68,7 @@ export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSe
       const time = getTimeFromX(e.clientX)
 
       if (isDragging === 'start') {
-        onStartChange(Math.max(0, Math.min(time, end - 0.1)))
+        onStartChange(Math.max(0, Math.min(time, duration)))
       } else if (isDragging === 'end') {
         onEndChange(Math.min(duration, Math.max(time, start + 0.1)))
       } else if (isDragging === 'scrub' && onSeek) {
