@@ -51,3 +51,4 @@ config
 tmp
 !.gitkeep
 temp
+cookies.txt

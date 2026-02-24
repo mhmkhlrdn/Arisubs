@@ -12,6 +12,8 @@ interface TrimBarProps {
 
 export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSeek }: TrimBarProps) {
   const [isDragging, setIsDragging] = useState<'start' | 'end' | 'scrub' | null>(null)
+  const [hoverTime, setHoverTime] = useState<number | null>(null)
+  const [hoverX, setHoverX] = useState(0)
   const barRef = useRef<HTMLDivElement>(null)
 
   // Guard against invalid duration
@@ -44,8 +46,6 @@ export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSe
   }
 
   const handleMouseDown = (e: React.MouseEvent, type: 'start' | 'end' | 'scrub') => {
-    // Left click (0) sets start if on scrub, or drags whatever was clicked
-    // Right click (2) sets end if on scrub
     if (type === 'scrub') {
       const time = getTimeFromX(e.clientX)
       if (e.button === 0) {
@@ -59,6 +59,17 @@ export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSe
     } else {
       setIsDragging(type)
     }
+  }
+
+  const handleBarMouseMove = (e: React.MouseEvent) => {
+    if (!barRef.current) return
+    const rect = barRef.current.getBoundingClientRect()
+    setHoverX(e.clientX - rect.left)
+    setHoverTime(getTimeFromX(e.clientX))
+  }
+
+  const handleBarMouseLeave = () => {
+    setHoverTime(null)
   }
 
   useEffect(() => {
@@ -92,18 +103,50 @@ export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSe
   const startPercent = (start / duration) * 100
   const endPercent = (end / duration) * 100
   const widthPercent = endPercent - startPercent
+  const barWidth = barRef.current?.clientWidth || 300
 
   return (
-    <div className="w-full">
+    <div style={{ width: '100%', position: 'relative' }}>
+      {/* Hover tooltip - rendered OUTSIDE the overflow:hidden bar */}
+      {hoverTime !== null && !isDragging && (
+        <div
+          style={{
+            position: 'absolute',
+            left: Math.max(35, Math.min(hoverX, barWidth - 35)),
+            top: -20,
+            transform: 'translateX(-50%)',
+            zIndex: 50,
+            pointerEvents: 'none',
+          }}
+        >
+          <div style={{
+            background: '#11111b',
+            color: '#cdd6f4',
+            fontSize: 10,
+            padding: '2px 6px',
+            borderRadius: 3,
+            border: '1px solid #45475a',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.5)',
+            whiteSpace: 'nowrap',
+            fontFamily: "'Consolas', 'Courier New', monospace",
+          }}>
+            {formatTime(hoverTime)}
+          </div>
+        </div>
+      )}
+
+      {/* The actual bar */}
       <div
         ref={barRef}
-        className="relative h-12 bg-gray-700 rounded-lg cursor-pointer"
+        className="relative h-8 bg-gray-700 rounded cursor-pointer overflow-hidden"
         onMouseDown={(e) => handleMouseDown(e, 'scrub')}
+        onMouseMove={handleBarMouseMove}
+        onMouseLeave={handleBarMouseLeave}
         onContextMenu={(e) => e.preventDefault()}
       >
         {/* Selected region highlight */}
         <div
-          className="absolute h-full bg-blue-500/30"
+          className="absolute h-full bg-blue-500/25"
           style={{
             left: `${startPercent}%`,
             width: `${widthPercent}%`,
@@ -112,28 +155,49 @@ export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSe
 
         {/* Start handle */}
         <motion.div
-          className="absolute top-0 bottom-0 w-2 bg-blue-500 cursor-ew-resize z-10"
+          className="absolute top-0 bottom-0 w-1.5 bg-green-400 cursor-ew-resize z-10 rounded-sm"
           style={{ left: `${startPercent}%` }}
           onMouseDown={(e) => {
             e.stopPropagation()
             handleMouseDown(e, 'start')
           }}
-          whileHover={{ scaleX: 1.5 }}
+          whileHover={{ scaleX: 2 }}
         />
 
         {/* End handle */}
         <motion.div
-          className="absolute top-0 bottom-0 w-2 bg-blue-500 cursor-ew-resize z-10"
+          className="absolute top-0 bottom-0 w-1.5 bg-red-400 cursor-ew-resize z-10 rounded-sm"
           style={{ left: `${endPercent}%` }}
           onMouseDown={(e) => {
             e.stopPropagation()
             handleMouseDown(e, 'end')
           }}
-          whileHover={{ scaleX: 1.5 }}
+          whileHover={{ scaleX: 2 }}
         />
+
+        {/* Hover indicator line inside the bar */}
+        {hoverTime !== null && !isDragging && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              bottom: 0,
+              width: 1,
+              left: hoverX,
+              background: 'rgba(255,255,255,0.5)',
+              pointerEvents: 'none',
+              zIndex: 20,
+            }}
+          />
+        )}
+
+        {/* Hint text */}
+        <div className="absolute inset-0 flex items-center justify-center text-[10px] text-gray-500 pointer-events-none">
+          Left click = Set Start &nbsp;·&nbsp; Right click = Set End
+        </div>
       </div>
 
-      <div className="flex justify-between mt-2 text-sm text-gray-400">
+      <div className="flex justify-between mt-1 text-[10px] text-gray-500">
         <span>Start: {formatTime(start)}</span>
         <span>End: {formatTime(end)}</span>
         <span>Duration: {formatTime(end - start)}</span>

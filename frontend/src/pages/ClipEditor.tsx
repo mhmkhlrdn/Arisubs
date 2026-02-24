@@ -100,6 +100,11 @@ export function ClipEditor() {
   const isPartialClipMode = !!(sessionStorage.getItem('importMode') === 'clip' && sessionStorage.getItem('videoUrl'))
   const [downloadedClipTimes, setDownloadedClipTimes] = useState<{ start: number; end: number } | null>(null)
 
+  const [activeDownloads, setActiveDownloads] = useState<Map<string, string>>(new Map())
+
+  const [previewKey, setPreviewKey] = useState(0)
+  const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const [showDecisionModal, setShowDecisionModal] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
   const [isExportingIndividual, setIsExportingIndividual] = useState(false)
@@ -116,7 +121,14 @@ export function ClipEditor() {
     setEndInput(formatTime(endTime))
   }, [endTime])
 
-  // Auto-extend end time when start crosses past end
+  useEffect(() => {
+    if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current)
+    previewDebounceRef.current = setTimeout(() => {
+      setPreviewKey(k => k + 1)
+    }, 600)
+    return () => { if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current) }
+  }, [startTime, endTime])
+
   useEffect(() => {
     if (startTime >= endTime) {
       const maxDuration = activeVideo?.duration || Infinity
@@ -233,6 +245,33 @@ export function ClipEditor() {
       setPartialJobId(null)
     }
   }, [partialStatus, isPartialClipMode, downloadedClipTimes, videoId])
+
+  useEffect(() => {
+    if (activeDownloads.size === 0) return
+    const interval = setInterval(async () => {
+      const { getJobState } = await import('../api/client')
+      const completed: string[] = []
+      for (const [clipId, jobId] of activeDownloads.entries()) {
+        try {
+          const state = await getJobState(jobId)
+          if (state.status === 'done' || state.status === 'error') {
+            completed.push(clipId)
+            if (state.status === 'done') {
+              setProcessingClips(prev => { const next = new Set(prev); next.delete(clipId); return next })
+            }
+          }
+        } catch { /* ignore */ }
+      }
+      if (completed.length > 0) {
+        setActiveDownloads(prev => {
+          const next = new Map(prev)
+          completed.forEach(id => next.delete(id))
+          return next
+        })
+      }
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [activeDownloads])
 
   // Check if the video file exists on disk; if not, it's remote (YouTube preview mode)
   useEffect(() => {
@@ -515,22 +554,35 @@ export function ClipEditor() {
 
   const handleDownloadSelection = useCallback(async () => {
     if (!videoId || !youtubeUrl) return
-    setIsDownloading(true)
-    setDownloadedClipTimes({ start: startTime, end: endTime })
+
+    const clipId = `clip-${Date.now()}`
+    const clipStart = startTime
+    const clipEnd = endTime
+    const clip = {
+      id: clipId,
+      videoId,
+      start: clipStart,
+      end: clipEnd,
+      label: `Clip ${clips.length + 1}`,
+    }
+    addClip(clip)
+    setProcessingClips(prev => new Set(prev).add(clipId))
+
+
     try {
-      const { jobId } = await downloadPartial(videoId, youtubeUrl, storedQuality, startTime, endTime, isLive)
+      const { jobId } = await downloadPartial(videoId, youtubeUrl, storedQuality, clipStart, clipEnd, isLive)
       if (jobId) {
-        setPartialJobId(jobId)
-        const { setVideoJobId } = useSessionStore.getState()
-        setVideoJobId(videoId, jobId)
+        setActiveDownloads(prev => new Map(prev).set(clipId, jobId))
       }
     } catch (err) {
       console.error('Failed to start partial download:', err)
       alert(err instanceof Error ? err.message : 'Failed to download')
-      setIsDownloading(false)
-      setDownloadedClipTimes(null)
+
+      const { removeClip: rc } = useSessionStore.getState()
+      rc(clipId)
+      setProcessingClips(prev => { const next = new Set(prev); next.delete(clipId); return next })
     }
-  }, [videoId, youtubeUrl, storedQuality, startTime, endTime, isLive])
+  }, [videoId, youtubeUrl, storedQuality, startTime, endTime, isLive, clips.length])
 
   return (
     <div className="main-container">
@@ -571,7 +623,7 @@ export function ClipEditor() {
                   gap: '8px',
                   width: '100%'
                 }}
-                className="hover:bg-[#313244]" // Assuming you have tailwind or similar, otherwise I should use onMouseEnter/Leave or a css class.
+                className="hover:bg-[#313244]"
                 onClick={() => {
                   navigate('/')
                   setIsFileMenuOpen(false)
@@ -634,13 +686,13 @@ export function ClipEditor() {
       </div>
 
       <div className="main-top-panel" style={{ height: 'calc(100vh - 120px)' }}>
-        <div className="main-video-panel" style={{ minWidth: '800px' }}>
+        <div className="main-video-panel" style={{ minWidth: '500px' }}>
           <div className="main-video-container" style={{ position: 'relative' }}>
             {isPartialClipMode ? (
               <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000' }}>
                 <iframe
                   ref={ytPlayerRef}
-                  src={`https://www.youtube.com/embed/${videoId}?enablejsapi=1&start=${Math.floor(currentTime)}`}
+                  src={`https://www.youtube.com/embed/${videoId}?enablejsapi=1`}
                   style={{ width: '100%', height: '100%', border: 'none' }}
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                   allowFullScreen
@@ -686,7 +738,9 @@ export function ClipEditor() {
             <span className="main-video-time">{formatTime(currentTime)}</span>
             <div style={{ flex: 1, margin: '0 12px' }}>
               {(() => {
-                const effectiveDuration = activeVideo.duration > 0 ? activeVideo.duration : (isLive ? 86400 : 0)
+                const effectiveDuration = activeVideo.duration > 0
+                  ? activeVideo.duration
+                  : (isLive || isPartialClipMode || isRemote) ? 86400 : 0
                 return effectiveDuration > 0 ? (
                   <TrimBar
                     duration={effectiveDuration}
@@ -699,7 +753,7 @@ export function ClipEditor() {
                 ) : null
               })()}
             </div>
-            <span className="main-video-time">{isLive && activeVideo.duration <= 0 ? 'LIVE' : formatTime(activeVideo.duration)}</span>
+            <span className="main-video-time">{activeVideo.duration > 0 ? formatTime(activeVideo.duration) : (isLive ? 'LIVE' : isPartialClipMode || isRemote ? 'Remote' : '—')}</span>
           </div>
 
           <div className="main-audio-toolbar" style={{ height: 32, justifyContent: 'center', gap: 16 }}>
@@ -728,12 +782,33 @@ export function ClipEditor() {
               <span className="main-video-time" style={{ color: '#89b4fa', fontWeight: 600 }}>{formatTime(endTime - startTime)}</span>
             </div>
           </div>
+
+          <div className="main-audio-toolbar" style={{ height: 28, justifyContent: 'center', gap: 4 }}>
+            <span className="main-label" style={{ marginRight: 4 }}>Skip:</span>
+            {[-7, -5, -3, 3, 5, 7].map(mins => (
+              <button
+                key={mins}
+                className="main-tbtn"
+                style={{ fontSize: 10, padding: '1px 5px', height: 20 }}
+                onClick={() => {
+                  const delta = mins * 60
+                  setStartTime(prev => Math.max(0, prev + delta))
+                  setEndTime(prev => Math.max(0, prev + delta))
+                }}
+                title={`${mins > 0 ? '+' : ''}${mins} minutes`}
+              >
+                {mins > 0 ? '+' : ''}{mins}m
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="main-audio-panel" style={{ borderLeft: '1px solid #313244', display: 'flex', flexDirection: 'column', minWidth: '360px' }}>
           <div style={{ display: 'flex', borderBottom: '1px solid #313244' }}>
             <button className={`main-tbtn ${isClipPreviewOpen ? 'main-tbtn-active' : ''}`} style={{ flex: 1, borderRadius: 0, height: 32 }} onClick={() => setIsClipPreviewOpen(true)}>Preview</button>
-            <button className={`main-tbtn ${!isClipPreviewOpen ? 'main-tbtn-active' : ''}`} style={{ flex: 1, borderRadius: 0, height: 32 }} onClick={() => setIsClipPreviewOpen(false)}>Clips ({clips.length})</button>
+            <button className={`main-tbtn ${!isClipPreviewOpen ? 'main-tbtn-active' : ''}`} style={{ flex: 1, borderRadius: 0, height: 32 }} onClick={() => setIsClipPreviewOpen(false)}>
+              Clips ({clips.length}){activeDownloads.size > 0 && <span style={{ marginLeft: 4, color: '#f9e2af', fontSize: 10 }}>⬇{activeDownloads.size}</span>}
+            </button>
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
@@ -743,7 +818,8 @@ export function ClipEditor() {
                 <div style={{ flex: 1, background: '#000', borderRadius: 4, overflow: 'hidden', marginBottom: 12, display: 'flex', flexDirection: 'column', minHeight: '240px' }}>
                   {isPartialClipMode ? (
                     <iframe
-                      src={`https://www.youtube.com/embed/${videoId}?start=${Math.floor(startTime)}&end=${Math.ceil(endTime)}&rel=0`}
+                      key={previewKey}
+                      src={`https://www.youtube.com/embed/${videoId}?start=${Math.floor(startTime)}&end=${Math.ceil(endTime)}&autoplay=1&rel=0`}
                       style={{ width: '100%', height: '100%', border: 'none' }}
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                       allowFullScreen
@@ -752,7 +828,8 @@ export function ClipEditor() {
                     <ClipPreview src={videoSrc} startTime={startTime} endTime={endTime} />
                   ) : isRemote ? (
                     <iframe
-                      src={`https://www.youtube.com/embed/${videoId}?start=${Math.floor(startTime)}&end=${Math.ceil(endTime)}&rel=0`}
+                      key={previewKey}
+                      src={`https://www.youtube.com/embed/${videoId}?start=${Math.floor(startTime)}&end=${Math.ceil(endTime)}&autoplay=1&rel=0`}
                       style={{ width: '100%', height: '100%', border: 'none' }}
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                       allowFullScreen
@@ -766,18 +843,16 @@ export function ClipEditor() {
                     onClick={handleDownloadSelection}
                     className="main-tbtn main-tbtn-primary"
                     style={{ width: '100%', height: 40, fontSize: 14, fontWeight: 600 }}
-                    disabled={isDownloading}
                   >
-                    <Download size={16} /> {isDownloading ? `Downloading... ${partialProgress}%` : 'Download Selection'}
+                    <Download size={16} /> Download Selection
                   </button>
                 ) : (isRemote && !isVideoReady) ? (
                   <button
                     onClick={handleDownloadSelection}
                     className="main-tbtn main-tbtn-primary"
                     style={{ width: '100%', height: 40, fontSize: 14, fontWeight: 600 }}
-                    disabled={isDownloading}
                   >
-                    <Download size={16} /> {isDownloading ? `Downloading... ${partialProgress}%` : 'Download Selection'}
+                    <Download size={16} /> Download Selection
                   </button>
                 ) : (
                   <button

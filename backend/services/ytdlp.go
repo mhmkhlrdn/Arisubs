@@ -16,8 +16,33 @@ import (
 
 type YtDlpService struct{}
 
+func init() {
+	// Ensure Deno is on PATH for yt-dlp JS challenge solving
+	home, _ := os.UserHomeDir()
+	denoPath := filepath.Join(home, ".deno", "bin")
+	if _, err := os.Stat(denoPath); err == nil {
+		currentPath := os.Getenv("PATH")
+		if !strings.Contains(currentPath, denoPath) {
+			os.Setenv("PATH", denoPath+string(os.PathListSeparator)+currentPath)
+			log.Printf("[DEBUG] Added Deno to PATH: %s", denoPath)
+		}
+	}
+}
+
 func NewYtDlpService() *YtDlpService {
 	return &YtDlpService{}
+}
+
+// getCookieArgs returns yt-dlp arguments for cookie authentication and JS challenge solving.
+// If a cookies.txt file exists in the working directory, it uses --cookies.
+// Always includes --remote-components for YouTube JS challenge solving via Deno.
+func getCookieArgs() []string {
+	args := []string{"--remote-components", "ejs:github"}
+	if _, err := os.Stat("cookies.txt"); err == nil {
+		log.Printf("[DEBUG] getCookieArgs: Using cookies.txt file")
+		args = append(args, "--cookies", "cookies.txt")
+	}
+	return args
 }
 
 type ytDlpInfo struct {
@@ -117,11 +142,9 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 	log.Printf("[DEBUG] DownloadVideo: Using format IDs/string: '%s'", formatString)
 	log.Printf("[DEBUG] DownloadVideo: Output template: %s", outputTemplate)
 
-	hasExplicitFormatID := strings.Contains(formatString, "+") || isNumericFormatID(formatString)
-	useAndroidClient := !hasExplicitFormatID && formatString != "best" && formatString != "worst"
-
-	cmdArgs := []string{
-		"-m", "yt_dlp",
+	cmdArgs := []string{"-m", "yt_dlp"}
+	cmdArgs = append(cmdArgs, getCookieArgs()...)
+	cmdArgs = append(cmdArgs,
 		"-f", formatString,
 		"--merge-output-format", "mp4",
 		"--write-info-json",
@@ -133,7 +156,7 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 		"--file-access-retries", "3",
 		"--retry-sleep", "1",
 		"-o", outputTemplate,
-	}
+	)
 
 	// Partial download: only fetch the specified time range
 	// Note: We intentionally omit --force-keyframes-at-cuts to allow stream copy
@@ -154,12 +177,7 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 
 	cmdArgs = append(cmdArgs, url)
 
-	if useAndroidClient {
-		cmdArgs = append(cmdArgs, "--extractor-args", "youtube:player_client=android")
-		log.Printf("[DEBUG] DownloadVideo: Using android client with format string")
-	} else {
-		log.Printf("[DEBUG] DownloadVideo: Using default client with explicit format IDs")
-	}
+	log.Printf("[DEBUG] DownloadVideo: Using default client for download")
 
 	cmd := exec.Command("py", cmdArgs...)
 
@@ -484,14 +502,15 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 }
 
 func (s *YtDlpService) GetVideoMetadata(url string) (*models.Video, error) {
-	cmd := exec.Command("py", "-m", "yt_dlp",
+	cookieArgs := getCookieArgs()
+	metaArgs := []string{"-m", "yt_dlp"}
+	metaArgs = append(metaArgs, cookieArgs...)
+	metaArgs = append(metaArgs,
 		"--dump-json",
 		"--no-download",
-		"--extractor-args", "youtube:player_client=android",
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		"--referer", "https://www.youtube.com/",
 		url,
 	)
+	cmd := exec.Command("py", metaArgs...)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -527,10 +546,10 @@ func (s *YtDlpService) GetVideoMetadata(url string) (*models.Video, error) {
 func (s *YtDlpService) GetAvailableFormats(url string) ([]models.QualityInfo, error) {
 	log.Printf("[DEBUG] GetAvailableFormats: Fetching formats for URL: %s", url)
 
-	cmd := exec.Command("py", "-m", "yt_dlp",
-		"-F",
-		url,
-	)
+	fmtArgs := []string{"-m", "yt_dlp"}
+	fmtArgs = append(fmtArgs, getCookieArgs()...)
+	fmtArgs = append(fmtArgs, "-F", url)
+	cmd := exec.Command("py", fmtArgs...)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -687,10 +706,10 @@ func (s *YtDlpService) GetFormatIDs(url string, quality string) (string, error) 
 		return "worst", nil
 	}
 
-	cmd := exec.Command("py", "-m", "yt_dlp",
-		"-F",
-		url,
-	)
+	fmtArgs := []string{"-m", "yt_dlp"}
+	fmtArgs = append(fmtArgs, getCookieArgs()...)
+	fmtArgs = append(fmtArgs, "-F", url)
+	cmd := exec.Command("py", fmtArgs...)
 
 	output, err := cmd.Output()
 	if err != nil {

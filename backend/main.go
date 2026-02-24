@@ -61,10 +61,10 @@ func main() {
 		api.POST("/video", videoHandler.SubmitVideo)
 		api.POST("/video/upload", videoHandler.UploadVideo)
 		api.GET("/videos", videoHandler.ListVideos)
+		api.GET("/video/qualities", videoHandler.GetAvailableQualities)
 		api.GET("/video/:id", videoHandler.GetVideo)
 		api.GET("/video/:id/file", videoHandler.ServeVideoFile)
 		api.HEAD("/video/:id/file", videoHandler.ServeVideoFile)
-		api.GET("/video/qualities", videoHandler.GetAvailableQualities)
 		api.POST("/video/:id/open-folder", videoHandler.OpenVideoFolder)
 		api.POST("/video/:id/download", videoHandler.DownloadPartial)
 

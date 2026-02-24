@@ -53,12 +53,13 @@
 }
 
 .main-video-panel {
-  flex: 0 0 auto;
+  flex: 1;
   background: #11111b;
   display: flex;
   flex-direction: column;
   border-right: 1px solid #313244;
   position: relative;
+  overflow: hidden;
 }
 
 .main-video-container {
