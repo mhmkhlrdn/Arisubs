@@ -43,3 +43,12 @@ export interface QualityInfo {
   size: string
   sizeInBytes: number
 }
+
+export interface Moment {
+  id: string
+  start: number
+  end: number
+  label: string
+  score: number
+  intensity: 'low' | 'medium' | 'high' | 'extreme'
+}

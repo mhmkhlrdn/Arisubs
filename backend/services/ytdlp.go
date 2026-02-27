@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type YtDlpService struct{}
@@ -33,14 +34,16 @@ func NewYtDlpService() *YtDlpService {
 	return &YtDlpService{}
 }
 
-// getCookieArgs returns yt-dlp arguments for cookie authentication and JS challenge solving.
-// If a cookies.txt file exists in the working directory, it uses --cookies.
-// Always includes --remote-components for YouTube JS challenge solving via Deno.
 func getCookieArgs() []string {
 	args := []string{"--remote-components", "ejs:github"}
+	// Prioritize cookies.txt (most reliable — works even when Chrome's App-Bound Encryption blocks --cookies-from-browser)
 	if _, err := os.Stat("cookies.txt"); err == nil {
 		log.Printf("[DEBUG] getCookieArgs: Using cookies.txt file")
 		args = append(args, "--cookies", "cookies.txt")
+	} else if authBytes, err := os.ReadFile("browser_auth.txt"); err == nil && len(authBytes) > 0 {
+		browser := strings.TrimSpace(string(authBytes))
+		log.Printf("[DEBUG] getCookieArgs: Using cookies from browser: %s", browser)
+		args = append(args, "--cookies-from-browser", browser)
 	}
 	return args
 }
@@ -205,8 +208,13 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 		segmentDuration = 0
 	}
 
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
 	scanner := bufio.NewScanner(stdout)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for scanner.Scan() {
 			line := scanner.Text()
 			log.Printf("[DEBUG] DownloadVideo stdout: %s", line)
@@ -243,7 +251,10 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 
 					job.Progress = int(progress)
 					job.Message = "Downloading..."
-					job.Updates <- models.JobUpdate{
+					select {
+					case <-done:
+						return
+					case job.Updates <- models.JobUpdate{
 						Status:     models.JobProcessing,
 						Progress:   int(progress),
 						Message:    "Downloading...",
@@ -251,6 +262,7 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 						Total:      totalSize,
 						Speed:      speed,
 						ETA:        eta,
+					}:
 					}
 				}
 			} else if segmentDuration > 0 {
@@ -275,11 +287,15 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 
 						job.Progress = int(progress)
 						job.Message = "Clipping section..."
-						job.Updates <- models.JobUpdate{
+						select {
+						case <-done:
+							return
+						case job.Updates <- models.JobUpdate{
 							Status:     models.JobProcessing,
 							Progress:   int(progress),
 							Message:    "Clipping section...",
 							Downloaded: downloadedSize,
+						}:
 						}
 					}
 				}
@@ -291,7 +307,9 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 	}()
 
 	stderrData := strings.Builder{}
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		scanner.Split(scanLinesOrCR)
 		for scanner.Scan() {
@@ -332,7 +350,10 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 
 					job.Progress = int(progress)
 					job.Message = "Downloading..."
-					job.Updates <- models.JobUpdate{
+					select {
+					case <-done:
+						return
+					case job.Updates <- models.JobUpdate{
 						Status:     models.JobProcessing,
 						Progress:   int(progress),
 						Message:    "Downloading...",
@@ -340,6 +361,7 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 						Total:      totalSize,
 						Speed:      speed,
 						ETA:        eta,
+					}:
 					}
 				}
 			} else if segmentDuration > 0 {
@@ -361,11 +383,15 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 
 						job.Progress = int(progress)
 						job.Message = "Clipping section..."
-						job.Updates <- models.JobUpdate{
+						select {
+						case <-done:
+							return
+						case job.Updates <- models.JobUpdate{
 							Status:     models.JobProcessing,
 							Progress:   int(progress),
 							Message:    "Clipping section...",
 							Downloaded: downloadedSize,
+						}:
 						}
 					}
 				}
@@ -377,7 +403,11 @@ func (s *YtDlpService) DownloadVideo(url string, outDir string, job *models.Job,
 	}()
 
 	log.Printf("[DEBUG] DownloadVideo: Waiting for command to complete...")
-	if err := cmd.Wait(); err != nil {
+	cmdErr := cmd.Wait()
+	close(done)
+	wg.Wait()
+	if cmdErr != nil {
+		err := cmdErr
 		stderrStr := stderrData.String()
 		log.Printf("[DEBUG] DownloadVideo: Command failed with error: %v", err)
 		log.Printf("[DEBUG] DownloadVideo: Full stderr output:\n%s", stderrStr)

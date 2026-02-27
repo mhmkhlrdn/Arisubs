@@ -38,10 +38,11 @@ func main() {
 	ytdlp := services.NewYtDlpService()
 	ffmpeg := services.NewFFmpegService()
 	translationService := services.NewTranslationService(cfg.LibreTranslateURL, cfg.LibreTranslateAPIKey)
+	analyzeService := services.NewAnalyzeService()
 
 	queue := jobs.NewJobQueue()
 
-	videoHandler := handlers.NewVideoHandler(queue, store, ytdlp, ffmpeg)
+	videoHandler := handlers.NewVideoHandler(queue, store, ytdlp, ffmpeg, analyzeService)
 	clipHandler := handlers.NewClipHandler(queue, store, ffmpeg)
 	exportHandler := handlers.NewExportHandler(queue, store, ffmpeg)
 	translationHandler := handlers.NewTranslationHandler(translationService)
@@ -58,7 +59,11 @@ func main() {
 
 	api := router.Group("/api")
 	{
+		api.POST("/video/cookies", videoHandler.SetBrowserCookies)
+		api.POST("/video/cookies/upload", videoHandler.UploadCookies)
+		api.POST("/video/cookies/auto", videoHandler.AutoExtractCookies)
 		api.POST("/video", videoHandler.SubmitVideo)
+		api.POST("/video/analyze", videoHandler.AnalyzeStream)
 		api.POST("/video/upload", videoHandler.UploadVideo)
 		api.GET("/videos", videoHandler.ListVideos)
 		api.GET("/video/qualities", videoHandler.GetAvailableQualities)

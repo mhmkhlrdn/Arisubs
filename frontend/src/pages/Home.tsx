@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { submitVideoUrl, getAvailableQualities, uploadVideo, listVideos } from '../api/client'
+import { submitVideoUrl, getAvailableQualities, uploadVideo, listVideos, uploadCookiesFile } from '../api/client'
 import { useSessionStore } from '../store/sessionStore'
 import { Upload, Youtube, Play, Download, Scissors } from 'lucide-react'
 import type { Video, QualityInfo } from '../types'
@@ -63,15 +63,52 @@ export function Home() {
           if (!labels.includes(quality)) {
             setQuality(filtered[0]?.label || '1080p')
           }
+          setError('')
         })
         .catch((err) => {
           console.error('Failed to fetch qualities:', err)
+          setError(err instanceof Error ? err.message : 'Failed to fetch qualities')
         })
         .finally(() => {
           setIsLoadingQualities(false)
         })
     }
   }, [url])
+
+  const retryQualities = () => {
+    if (url.trim() && validateYouTubeUrl(url)) {
+      setIsLoadingQualities(true)
+      getAvailableQualities(url)
+        .then((qualities) => {
+          const filtered = qualities.filter(q => q.label !== 'best' && q.label !== 'worst')
+          setAvailableQualities(filtered)
+          const labels = filtered.map(q => q.label)
+          if (!labels.includes(quality)) {
+            setQuality(filtered[0]?.label || '1080p')
+          }
+          setError('')
+        })
+        .catch((err) => {
+          console.error('Failed to fetch qualities:', err)
+          setError(err instanceof Error ? err.message : 'Failed to fetch qualities')
+        })
+        .finally(() => {
+          setIsLoadingQualities(false)
+        })
+    }
+  }
+
+  const handleCookiesUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      await uploadCookiesFile(file)
+      setError('')
+      retryQualities()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to upload cookies')
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -314,11 +351,61 @@ export function Home() {
                   </select>
                 </div>
 
-                {error && activeTab === 'youtube' && (
-                  <div style={{ background: 'rgba(243,139,168,0.15)', border: '1px solid #f38ba8', color: '#f38ba8', padding: '10px', borderRadius: '4px', fontSize: '13px', marginBottom: '12px' }}>
-                    {error}
-                  </div>
-                )}
+                {error && activeTab === 'youtube' && (() => {
+                  const isBotErr = error.toLowerCase().includes('sign in to confirm') || error.toLowerCase().includes('not a bot') || error.toLowerCase().includes('dpapi')
+                  if (isBotErr) {
+                    return (
+                      <div style={{ background: 'rgba(243,139,168,0.15)', border: '1px solid #f38ba8', color: '#f38ba8', padding: '12px', borderRadius: '8px', fontSize: '13px', marginBottom: '12px' }}>
+                        <div style={{ fontWeight: 600, marginBottom: '8px' }}>⚠ YouTube requires authentication</div>
+                        <div style={{ marginBottom: '10px', color: '#cdd6f4', lineHeight: '1.6' }}>
+                          Export your YouTube cookies and upload them here (one-time setup):
+                        </div>
+                        <div style={{ display: 'flex', gap: '10px', marginBottom: '12px' }}>
+                          <div style={{ flex: 1, background: 'rgba(0,0,0,0.2)', borderRadius: '6px', padding: '10px', textAlign: 'center' }}>
+                            <div style={{ color: '#89b4fa', fontWeight: 600, fontSize: '16px', marginBottom: '4px' }}>1</div>
+                            <div style={{ color: '#a6adc8', fontSize: '11px', lineHeight: '1.4' }}>
+                              Install{' '}
+                              <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener noreferrer" style={{ color: '#89b4fa' }}>
+                                cookies.txt extension
+                              </a>
+                            </div>
+                          </div>
+                          <div style={{ flex: 1, background: 'rgba(0,0,0,0.2)', borderRadius: '6px', padding: '10px', textAlign: 'center' }}>
+                            <div style={{ color: '#89b4fa', fontWeight: 600, fontSize: '16px', marginBottom: '4px' }}>2</div>
+                            <div style={{ color: '#a6adc8', fontSize: '11px', lineHeight: '1.4' }}>
+                              Go to{' '}
+                              <a href="https://www.youtube.com" target="_blank" rel="noopener noreferrer" style={{ color: '#89b4fa' }}>
+                                youtube.com
+                              </a>{' '}
+                              & export cookies
+                            </div>
+                          </div>
+                          <div style={{ flex: 1, background: 'rgba(0,0,0,0.2)', borderRadius: '6px', padding: '10px', textAlign: 'center' }}>
+                            <div style={{ color: '#89b4fa', fontWeight: 600, fontSize: '16px', marginBottom: '4px' }}>3</div>
+                            <div style={{ color: '#a6adc8', fontSize: '11px', lineHeight: '1.4' }}>Upload below ↓</div>
+                          </div>
+                        </div>
+                        <label className="main-tbtn" style={{
+                          padding: '8px 16px', fontSize: '12px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '6px',
+                          backgroundColor: 'rgba(137, 180, 250, 0.15)', border: '1px solid #89b4fa', color: '#89b4fa', borderRadius: '6px', width: '100%', justifyContent: 'center'
+                        }}>
+                          <Upload size={14} /> Upload cookies.txt
+                          <input
+                            type="file"
+                            accept=".txt"
+                            onChange={handleCookiesUpload}
+                            style={{ display: 'none' }}
+                          />
+                        </label>
+                      </div>
+                    )
+                  }
+                  return (
+                    <div style={{ background: 'rgba(243,139,168,0.15)', border: '1px solid #f38ba8', color: '#f38ba8', padding: '10px', borderRadius: '4px', fontSize: '13px', marginBottom: '12px' }}>
+                      {error}
+                    </div>
+                  )
+                })()}
 
                 <button
                   type="submit"

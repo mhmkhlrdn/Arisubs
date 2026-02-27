@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,15 +26,17 @@ type VideoHandler struct {
 	store         *storage.Store
 	ytdlp         *services.YtDlpService
 	ffmpeg        *services.FFmpegService
+	analyze       *services.AnalyzeService
 }
 
-func NewVideoHandler(queue *jobs.JobQueue, store *storage.Store, ytdlp *services.YtDlpService, ffmpeg *services.FFmpegService) *VideoHandler {
+func NewVideoHandler(queue *jobs.JobQueue, store *storage.Store, ytdlp *services.YtDlpService, ffmpeg *services.FFmpegService, analyze *services.AnalyzeService) *VideoHandler {
 	return &VideoHandler{
 		queue:         queue,
 		downloadQueue: jobs.NewDownloadQueue(),
 		store:         store,
 		ytdlp:         ytdlp,
 		ffmpeg:        ffmpeg,
+		analyze:       analyze,
 	}
 }
 
@@ -454,4 +457,108 @@ func (h *VideoHandler) ListVideos(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, videos)
+}
+
+func (h *VideoHandler) SetBrowserCookies(c *gin.Context) {
+	var req struct {
+		Browser string `json:"browser" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	if req.Browser == "none" {
+		os.Remove("browser_auth.txt")
+		c.JSON(http.StatusOK, gin.H{"message": "Browser cookies disabled"})
+		return
+	}
+
+	if err := os.WriteFile("browser_auth.txt", []byte(req.Browser), 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure browser cookies"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Browser cookies configured"})
+}
+
+func (h *VideoHandler) UploadCookies(c *gin.Context) {
+	file, _, err := c.Request.FormFile("cookies")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No cookies file uploaded"})
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read cookies file"})
+		return
+	}
+
+	if err := os.WriteFile("cookies.txt", data, 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save cookies file"})
+		return
+	}
+
+	log.Printf("[DEBUG] UploadCookies: Saved cookies.txt (%d bytes)", len(data))
+	c.JSON(http.StatusOK, gin.H{"message": "Cookies uploaded successfully"})
+}
+
+func (h *VideoHandler) AutoExtractCookies(c *gin.Context) {
+	log.Printf("[DEBUG] AutoExtractCookies: Starting automatic cookie extraction")
+
+	cmd := exec.Command("py", "scripts/extract_cookies.py", "cookies.txt")
+	output, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = string(exitErr.Stderr)
+		}
+		log.Printf("[DEBUG] AutoExtractCookies: Failed: %v, stderr: %s", err, stderr)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to extract cookies from browser. Make sure you are logged into YouTube in your browser.",
+			"details": stderr,
+		})
+		return
+	}
+
+	result := strings.TrimSpace(string(output))
+	parts := strings.SplitN(result, ":", 2)
+	browser := "unknown"
+	count := "0"
+	if len(parts) == 2 {
+		browser = parts[0]
+		count = parts[1]
+	}
+
+	log.Printf("[DEBUG] AutoExtractCookies: Success - browser: %s, cookies: %s", browser, count)
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("Extracted %s cookies from %s", count, browser),
+		"browser": browser,
+		"count":   count,
+	})
+}
+
+func (h *VideoHandler) AnalyzeStream(c *gin.Context) {
+	var req struct {
+		URL      string  `json:"url" binding:"required"`
+		Duration float64 `json:"duration"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	moments, err := h.analyze.AnalyzeStream(req.URL, req.Duration)
+	if err != nil {
+		// Log full error but return a clean message
+		log.Printf("[DEBUG] AnalyzeStream failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to analyze stream: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"moments": moments,
+	})
 }

@@ -90,3 +90,16 @@ type QualityInfo struct {
 	Size        string `json:"size"`
 	SizeInBytes int64  `json:"sizeInBytes"`
 }
+
+/*
+ * [Moment]
+ * Represents an exciting/highlight moment derived from chat activity
+ */
+type Moment struct {
+	ID        string  `json:"id"`
+	Start     float64 `json:"start"`
+	End       float64 `json:"end"`
+	Label     string  `json:"label"`
+	Score     float64 `json:"score"`
+	Intensity string  `json:"intensity"` // "low", "medium", "high", "extreme"
+}

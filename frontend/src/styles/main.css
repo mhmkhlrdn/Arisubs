@@ -6,7 +6,7 @@
   color: #cdd6f4;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   font-size: 12px;
-  overflow: hidden;
+  overflow-x: hidden;
   user-select: none;
 }
 
@@ -555,6 +555,8 @@
   flex: 1;
   padding: 40px 20px;
   background: radial-gradient(circle at center, #1e1e2e 0%, #11111b 100%);
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .main-card {

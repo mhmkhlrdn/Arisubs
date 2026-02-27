@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion } from 'framer-motion'
+import { Moment } from '../types'
 
 interface TrimBarProps {
   duration: number  // total video duration in seconds
@@ -8,9 +9,10 @@ interface TrimBarProps {
   onStartChange: (start: number) => void
   onEndChange: (end: number) => void
   onSeek?: (time: number) => void
+  moments?: Moment[]
 }
 
-export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSeek }: TrimBarProps) {
+export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSeek, moments = [] }: TrimBarProps) {
   const [isDragging, setIsDragging] = useState<'start' | 'end' | 'scrub' | null>(null)
   const [hoverTime, setHoverTime] = useState<number | null>(null)
   const [hoverX, setHoverX] = useState(0)
@@ -146,16 +148,40 @@ export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSe
       >
         {/* Selected region highlight */}
         <div
-          className="absolute h-full bg-blue-500/25"
+          className="absolute h-full bg-blue-500/25 z-10"
           style={{
             left: `${startPercent}%`,
             width: `${widthPercent}%`,
           }}
         />
 
+        {/* Moments markers */}
+        {moments.map(m => {
+          const mStartPct = (m.start / duration) * 100
+          const mEndPct = (m.end / duration) * 100
+          const mWidth = Math.max(0.5, mEndPct - mStartPct)
+          const color = m.intensity === 'extreme' ? '#f38ba8' : m.intensity === 'high' ? '#fab387' : '#f9e2af'
+
+          return (
+            <div
+              key={m.id}
+              className="absolute bottom-0 opacity-80 z-0"
+              style={{
+                left: `${mStartPct}%`,
+                width: `${mWidth}%`,
+                height: '40%',
+                background: color,
+                borderTopLeftRadius: 2,
+                borderTopRightRadius: 2,
+              }}
+              title={`${m.label} (Score: ${m.score.toFixed(1)})`}
+            />
+          )
+        })}
+
         {/* Start handle */}
         <motion.div
-          className="absolute top-0 bottom-0 w-1.5 bg-green-400 cursor-ew-resize z-10 rounded-sm"
+          className="absolute top-0 bottom-0 w-1.5 bg-green-400 cursor-ew-resize z-20 rounded-sm"
           style={{ left: `${startPercent}%` }}
           onMouseDown={(e) => {
             e.stopPropagation()
@@ -166,7 +192,7 @@ export function TrimBar({ duration, start, end, onStartChange, onEndChange, onSe
 
         {/* End handle */}
         <motion.div
-          className="absolute top-0 bottom-0 w-1.5 bg-red-400 cursor-ew-resize z-10 rounded-sm"
+          className="absolute top-0 bottom-0 w-1.5 bg-red-400 cursor-ew-resize z-20 rounded-sm"
           style={{ left: `${endPercent}%` }}
           onMouseDown={(e) => {
             e.stopPropagation()

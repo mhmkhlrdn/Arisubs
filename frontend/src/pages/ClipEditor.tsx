@@ -4,7 +4,7 @@ import { Plus, Settings, Download, ChevronDown, FolderOpen, Home, ArrowLeft, Fil
 import { useSessionStore } from '../store/sessionStore'
 import { useVideoMetadata } from '../hooks/useVideoMetadata'
 import { useJobProgress } from '../hooks/useJobProgress'
-import { getVideoFileUrl, createClip, submitVideoUrl, getAvailableQualities, openVideoFolder, downloadPartial, submitExport, submitExportIndividual, getDownloadUrl, getClipDownloadUrl } from '../api/client'
+import { getVideoFileUrl, createClip, submitVideoUrl, getAvailableQualities, openVideoFolder, downloadPartial, submitExport, submitExportIndividual, getDownloadUrl, getClipDownloadUrl, analyzeStream } from '../api/client'
 import { VideoPlayer } from '../components/VideoPlayer'
 import { TrimBar } from '../components/TrimBar'
 import { ClipTray } from '../components/ClipTray'
@@ -12,7 +12,7 @@ import { ClipPreview } from '../components/ClipPreview'
 import { Modal } from '../components/Modal'
 import { ProgressBar } from '../components/ProgressBar'
 import { formatTime, parseTime } from '../types/subtitle'
-import { QualityInfo } from '../types'
+import { QualityInfo, Moment } from '../types'
 import '../styles/main.css'
 
 /**
@@ -95,6 +95,8 @@ export function ClipEditor() {
   const [isRemote, setIsRemote] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [partialJobId, setPartialJobId] = useState<string | null>(null)
+  const [leftPanelPct, setLeftPanelPct] = useState(60)
+  const containerRef = useRef<HTMLDivElement>(null)
   const ytPlayerRef = useRef<HTMLIFrameElement>(null)
   const { status: partialStatus, progress: partialProgress } = useJobProgress(partialJobId)
   const isPartialClipMode = !!(sessionStorage.getItem('importMode') === 'clip' && sessionStorage.getItem('videoUrl'))
@@ -112,6 +114,57 @@ export function ClipEditor() {
   const { exportJobId, setExportJobId } = useSessionStore()
   const { progress: exportProgress, status: exportStatus, message: exportMessage, error: exportError } = useJobProgress(exportJobId)
   const { progress: individualProgress, status: individualStatus, message: individualMessage, error: individualError } = useJobProgress(individualJobId)
+
+  // Moment detection state
+  const [momentsByVideo, setMomentsByVideo] = useState<Record<string, Moment[]>>(() => {
+    try {
+      const stored = sessionStorage.getItem('momentsByVideo')
+      return stored ? JSON.parse(stored) : {}
+    } catch {
+      return {}
+    }
+  })
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'moments'>('clips')
+
+  const currentMoments = videoId ? (momentsByVideo[videoId] || []) : []
+
+  const handleAnalyze = async () => {
+    if (!videoId) return
+    let targetUrl = sessionStorage.getItem('videoUrl')
+    if (!targetUrl) {
+      targetUrl = `https://www.youtube.com/watch?v=${videoId}`
+    }
+
+    setIsAnalyzing(true)
+    try {
+      const currentVideo = videoId ? videos[videoId] || video : null
+      const detected = await analyzeStream(targetUrl, currentVideo?.duration)
+
+      setMomentsByVideo(prev => {
+        const next = { ...prev, [videoId]: detected || [] }
+        sessionStorage.setItem('momentsByVideo', JSON.stringify(next))
+        return next
+      })
+
+      setActiveTab('moments')
+      if (detected && detected.length === 0) {
+        alert("Finished analyzing, but no exciting moments were found.")
+      }
+    } catch (err: any) {
+      console.error('Failed to detect moments:', err)
+      alert(err.message || 'Failed to detect moments')
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
+  const handleSeekToMoment = (m: Moment) => {
+    setStartTime(m.start)
+    setEndTime(m.end)
+    setCurrentTime(m.start)
+    // Optional: auto play preview
+  }
 
   useEffect(() => {
     setStartInput(formatTime(startTime))
@@ -540,6 +593,32 @@ export function ClipEditor() {
     setIsFileMenuOpen(false)
   }
 
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startPct = leftPanelPct
+    const container = containerRef.current
+    if (!container) return
+    const containerWidth = container.getBoundingClientRect().width
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX
+      const deltaPct = (dx / containerWidth) * 100
+      const newPct = Math.min(80, Math.max(30, startPct + deltaPct))
+      setLeftPanelPct(newPct)
+    }
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [leftPanelPct])
+
   if (!activeVideo) {
     return (
       <div className="main-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -658,6 +737,22 @@ export function ClipEditor() {
         <button className="main-tbtn" title="Add another video" onClick={() => setIsAddingVideo(true)}>
           <Plus size={14} /> Add Video
         </button>
+        <button
+          className="main-tbtn"
+          title="Detect exciting moments automatically from live chat"
+          onClick={handleAnalyze}
+          disabled={isAnalyzing}
+          style={{ width: 130, justifyContent: 'center' }}
+        >
+          {isAnalyzing ? (
+            <>
+              <div style={{ width: 12, height: 12, border: '2px solid #a6adc8', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+              Analyzing...
+            </>
+          ) : (
+            '✨ Detect Moments'
+          )}
+        </button>
         <div className="main-editbox-separator" />
         <div className="main-editbox-control" style={{ gap: 6 }}>
           <span className="main-label">Active Stream:</span>
@@ -685,8 +780,8 @@ export function ClipEditor() {
         )}
       </div>
 
-      <div className="main-top-panel" style={{ height: 'calc(100vh - 120px)' }}>
-        <div className="main-video-panel" style={{ minWidth: '500px' }}>
+      <div ref={containerRef} className="main-top-panel" style={{ height: 'calc(100vh - 120px)' }}>
+        <div className="main-video-panel" style={{ width: `${leftPanelPct}%`, minWidth: 300, flexShrink: 0, flex: 'none' }}>
           <div className="main-video-container" style={{ position: 'relative' }}>
             {isPartialClipMode ? (
               <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000' }}>
@@ -749,6 +844,7 @@ export function ClipEditor() {
                     onStartChange={setStartTime}
                     onEndChange={setEndTime}
                     onSeek={setCurrentTime}
+                    moments={currentMoments}
                   />
                 ) : null
               })()}
@@ -803,16 +899,32 @@ export function ClipEditor() {
           </div>
         </div>
 
-        <div className="main-audio-panel" style={{ borderLeft: '1px solid #313244', display: 'flex', flexDirection: 'column', minWidth: '360px' }}>
+        <div
+          onMouseDown={handleResizeMouseDown}
+          style={{
+            width: 5,
+            cursor: 'col-resize',
+            background: '#313244',
+            flexShrink: 0,
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = '#89b4fa')}
+          onMouseLeave={e => (e.currentTarget.style.background = '#313244')}
+        />
+
+        <div className="main-audio-panel" style={{ borderLeft: 'none', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 280, overflow: 'hidden' }}>
           <div style={{ display: 'flex', borderBottom: '1px solid #313244' }}>
-            <button className={`main-tbtn ${isClipPreviewOpen ? 'main-tbtn-active' : ''}`} style={{ flex: 1, borderRadius: 0, height: 32 }} onClick={() => setIsClipPreviewOpen(true)}>Preview</button>
-            <button className={`main-tbtn ${!isClipPreviewOpen ? 'main-tbtn-active' : ''}`} style={{ flex: 1, borderRadius: 0, height: 32 }} onClick={() => setIsClipPreviewOpen(false)}>
+            <button className={`main-tbtn ${activeTab === 'preview' ? 'main-tbtn-active' : ''}`} style={{ flex: 1, borderRadius: 0, height: 32 }} onClick={() => setActiveTab('preview')}>Preview</button>
+            <button className={`main-tbtn ${activeTab === 'clips' ? 'main-tbtn-active' : ''}`} style={{ flex: 1, borderRadius: 0, height: 32 }} onClick={() => setActiveTab('clips')}>
               Clips ({clips.length}){activeDownloads.size > 0 && <span style={{ marginLeft: 4, color: '#f9e2af', fontSize: 10 }}>⬇{activeDownloads.size}</span>}
+            </button>
+            <button className={`main-tbtn ${activeTab === 'moments' ? 'main-tbtn-active' : ''}`} style={{ flex: 1, borderRadius: 0, height: 32 }} onClick={() => setActiveTab('moments')}>
+              Moments {currentMoments.length > 0 && `(${currentMoments.length})`}
             </button>
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
-            {isClipPreviewOpen ? (
+            {activeTab === 'preview' ? (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                 <div className="main-section-title">{isPartialClipMode || (isRemote && !isVideoReady) ? 'Selection Preview' : 'Clip Boundary Preview'}</div>
                 <div style={{ flex: 1, background: '#000', borderRadius: 4, overflow: 'hidden', marginBottom: 12, display: 'flex', flexDirection: 'column', minHeight: '240px' }}>
@@ -864,7 +976,7 @@ export function ClipEditor() {
                   </button>
                 )}
               </div>
-            ) : (
+            ) : activeTab === 'clips' ? (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                 <div className="main-section-title" style={{ marginBottom: 8 }}>Collected Clips ({clips.length})</div>
                 <div style={{ flex: 1 }}>
@@ -874,6 +986,37 @@ export function ClipEditor() {
                     onViewClip={handleViewClip}
                   />
                 </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                <div className="main-section-title" style={{ marginBottom: 8 }}>Detected Highlights</div>
+                {currentMoments.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: '#6c7086', marginTop: 40, fontSize: 13 }}>
+                    No moments detected yet. Click "Detect Moments" in the toolbar above to analyze chat activity.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {currentMoments.map((m) => (
+                      <div
+                        key={m.id}
+                        onClick={() => handleSeekToMoment(m)}
+                        className={`hover:bg-[#313244] p-3 rounded cursor-pointer border border-transparent transition-colors`}
+                        style={{ background: '#1e1e2e', borderLeft: `3px solid ${m.intensity === 'extreme' ? '#f38ba8' : m.intensity === 'high' ? '#fab387' : '#f9e2af'}` }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                          <span style={{ fontWeight: 600, color: '#cdd6f4', fontSize: 13 }}>{m.label}</span>
+                          <span style={{ fontSize: 11, color: '#a6adc8', background: '#313244', padding: '2px 6px', borderRadius: 4 }}>
+                            {formatTime(m.start)} - {formatTime(m.end)}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ color: '#6c7086', fontSize: 11 }}>Chat activity spike</span>
+                          <span style={{ fontSize: 10, color: '#89b4fa', fontWeight: 600 }}>Score: {m.score.toFixed(1)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

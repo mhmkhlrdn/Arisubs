@@ -1,4 +1,4 @@
-import type { Clip, JobUpdate, Video, QualityInfo } from '../types'
+import type { Clip, JobUpdate, Video, QualityInfo, Moment } from '../types'
 
 const API_BASE = '/api'
 
@@ -109,6 +109,14 @@ export async function getJobState(jobId: string): Promise<JobUpdate> {
   return fetchJSON<JobUpdate>(`${API_BASE}/jobs/${jobId}`)
 }
 
+export async function analyzeStream(url: string, duration?: number): Promise<Moment[]> {
+  const result = await fetchJSON<{ moments: Moment[] }>(`${API_BASE}/video/analyze`, {
+    method: 'POST',
+    body: JSON.stringify({ url, duration }),
+  })
+  return result.moments
+}
+
 export function getDownloadUrl(jobId: string): string {
   return `${API_BASE}/export/${jobId}/download`
 }
@@ -131,10 +139,45 @@ export async function downloadPartial(videoId: string, url: string, quality: str
 export async function getAvailableQualities(url: string): Promise<QualityInfo[]> {
   const response = await fetch(`${API_BASE}/video/qualities?url=${encodeURIComponent(url)}`)
   if (!response.ok) {
-    throw new Error('Failed to fetch available qualities')
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to fetch available qualities')
   }
   const data = await response.json()
   return data.qualities || []
+}
+
+export async function setBrowserCookies(browser: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/video/cookies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ browser })
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to set browser cookies');
+  }
+}
+
+export async function uploadCookiesFile(file: File): Promise<void> {
+  const formData = new FormData()
+  formData.append('cookies', file)
+  const response = await fetch(`${API_BASE}/video/cookies/upload`, {
+    method: 'POST',
+    body: formData
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to upload cookies file');
+  }
+}
+
+export async function autoExtractCookies(): Promise<{ message: string, browser: string, count: string }> {
+  const response = await fetch(`${API_BASE}/video/cookies/auto`, { method: 'POST' });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to auto-extract cookies');
+  }
+  return response.json();
 }
 
 export async function translateText(text: string, sourceLanguage: string, targetLanguage: string): Promise<string> {
